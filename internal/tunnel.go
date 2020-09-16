@@ -1,18 +1,52 @@
 package resttunnel
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	jsoniter "github.com/json-iterator/go"
 	"github.com/rs/zerolog"
 	"github.com/tevino/abool"
 	"github.com/valyala/fasthttp"
 )
 
+// VERSION respects semantic versioning
+const VERSION = "0.1"
+
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
+
+// TunnelConfiguration represents the configuration for RestTunnel
+type TunnelConfiguration struct {
+	Host string `json:"host" yaml:"host"`
+
+	Logging struct {
+		ConsoleLoggingEnabled bool `json:"console_logging" yaml:"console_logging"`
+		FileLoggingEnabled    bool `json:"file_logging" yaml:"file_logging"`
+
+		EncodeAsJSON bool `json:"encode_as_json" yaml:"encode_as_json"` // Make the framework log as json
+
+		Directory  string `json:"directory" yaml:"directory"`     // Directory to log into
+		Filename   string `json:"filename" yaml:"filename"`       // Name of logfile
+		MaxSize    int    `json:"max_size" yaml:"max_size"`       /// Size in MB before a new file
+		MaxBackups int    `json:"max_backups" yaml:"max_backups"` // Number of files to keep
+		MaxAge     int    `json:"max_age" yaml:"max_age"`         // Number of days to keep a logfile
+	} `json:"logging" yaml:"logging"`
+}
+
 // RestTunnel represents the global application state
 type RestTunnel struct {
+	ctx    context.Context
+	cancel func()
+
 	Logger zerolog.Logger `json:"-"`
 
 	Start time.Time `json:"uptime"`
@@ -31,8 +65,21 @@ type RestTunnel struct {
 
 // Queue represents a Deque with a priority queue
 type Queue struct {
-	JobActive *abool.AtomicBool
-	Bucket    *Bucket
+	// We use a channel to painlessly control how many Jobs should be active. If we have 4
+	// jobs active and only want 2 running, we send 2 booleans down JobClosure and if we
+	// wanted to add 1 more we would just create a Queue job normally. Reference
+	// TotalJobsActive for how many are active and use JobsActive to wait when closing
+	// a queue. BalancerActive signifys if the balancer is enabled and limits to only one
+	// being ran at a time. The balancer simply creates more queue jobs when necessary.
+	BalancerActive *abool.AtomicBool
+
+	TotalJobsActive *int64
+	JobsActive      *sync.WaitGroup
+	JobClosure      chan bool
+
+	JobsHandled *int64
+
+	Bucket *Bucket
 
 	events   *int64
 	priority *int64
@@ -41,60 +88,196 @@ type Queue struct {
 	Events         chan *TunnelRequest
 }
 
+// ErrorResponse is the structure error messages are returned to by the client. We do not
+// have a Success response as the raw response is sent.
+type ErrorResponse struct {
+	Error   string    `json:"error"`
+	Success bool      `json:"success"`
+	Queued  bool      `json:"queued"` // Boolean if the request has already been queued
+	UUID    uuid.UUID `json:"uuid"`
+}
+
+// NewTunnel creates a RestTunnel instance
+func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
+
+	rt = &RestTunnel{
+		Logger: zerolog.New(logger).With().Timestamp().Logger(),
+		Start:  time.Now().UTC(),
+
+		HTTP: &fasthttp.Client{
+			Name:                          "RestTunnel",
+			NoDefaultUserAgentHeader:      true,
+			DisableHeaderNamesNormalizing: true,
+		},
+
+		bucketsMu: sync.RWMutex{},
+		Buckets:   make(map[string]*Bucket),
+
+		queuesMu: sync.RWMutex{},
+		Queues:   make(map[string]*Queue),
+
+		callbacksMu: sync.RWMutex{},
+		Callbacks:   make(map[string]*TunnelResponse),
+	}
+}
+
 // HandleQueueJob handles a TunnelRequest gathered from a queue
 func (rt *RestTunnel) HandleQueueJob(tr *TunnelRequest) {
+}
 
+// SetQueueCount changes how many queue jobs are running
+func (rt *RestTunnel) SetQueueCount(q *Queue, count int64) {
+	change := count - atomic.LoadInt64(q.TotalJobsActive)
+
+	if change == 0 {
+		return
+	}
+
+	if change > 0 {
+		// Create more jobs
+		for i := int64(0); i < change; i++ {
+			go rt.StartQueueJob(q)
+		}
+	} else {
+		// Send JobClosure events to stop a single running task
+		for i := int64(0); i < change; i++ {
+			q.JobClosure <- true
+		}
+	}
 }
 
 // StartQueueJob starts a queue job
 func (rt *RestTunnel) StartQueueJob(q *Queue) {
-	// If we try to start the job whilst it is already running, we will nope out of there.
-	if q.JobActive.IsSet() {
-		return
-	}
-
-	q.JobActive.Set()
-	defer q.JobActive.UnSet()
+	atomic.AddInt64(q.TotalJobsActive, 1)
+	q.JobsActive.Add(1)
+	defer func() {
+		q.JobsActive.Done()
+		atomic.AddInt64(q.TotalJobsActive, 1)
+	}()
 
 	for {
 		// Gives channel PriorityEvents priority
 		select {
 		case tr := <-q.PriorityEvents:
+			atomic.AddInt64(q.JobsHandled, 1)
 			rt.HandleQueueJob(tr)
 			continue
 		default:
 		}
 		select {
 		case tr := <-q.PriorityEvents:
+			atomic.AddInt64(q.JobsHandled, 1)
 			rt.HandleQueueJob(tr)
 			continue
 		case tr := <-q.Events:
+			atomic.AddInt64(q.JobsHandled, 1)
 			rt.HandleQueueJob(tr)
 			continue
+		case <-q.JobClosure:
+			return
 		}
+	}
+}
+
+// BalanceQueueJobs is the task that ensures that the queue is able to keep up
+func (rt *RestTunnel) BalanceQueueJobs(q *Queue) {
+	// Duration how long we should account for
+	preserveTime := time.Minute
+	// How often we should check
+	interval := 30 * time.Second
+
+	// Minimum a job can do on its own. If we try launch 10 jobs when we only
+	// process 40 requests, it will limit to only 2 because the minEventsPerJob
+	// is 30. Increase to make it less likely jobs will be removed.
+	minEventsPerJob := 30
+
+	events := int64(0)
+
+	// Used to extrapolate how many jobs should be running
+	timeScale := float64(preserveTime) / float64(interval)
+
+	// Initial
+	rt.SetQueueCount(q, 1)
+
+	t := time.NewTicker(interval)
+	for {
+		<-t.C
+
+		jobsSince := atomic.LoadInt64(q.JobsHandled)
+		change := jobsSince - events
+
+		minuteHandle := float64(change) * timeScale
+		waitingOn := float64(len(q.PriorityEvents) + len(q.Events))
+		jobScale := (minuteHandle + waitingOn) / minuteHandle
+		jobsNeeded := math.Floor(float64(atomic.LoadInt64(q.TotalJobsActive)) * jobScale)
+
+		actualJobsNeeded := int64(math.Min(jobsNeeded, math.Floor(minuteHandle/float64(minEventsPerJob))))
+
+		println("Handling", minuteHandle)
+		println("Waiting On", waitingOn)
+		println("Expected jobs needed", jobsNeeded, "scale of", jobScale)
+		println("Minimum", math.Floor(minuteHandle/float64(minEventsPerJob)))
+		println("Chose", actualJobsNeeded)
 	}
 }
 
 // HandleRequest handles a HTTP request given to RestTunnel
 func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
+	id := uuid.New()
+
 	hasPriority, err := strconv.ParseBool(string(ctx.Request.Header.Peek("RT-Priority")))
 	if err != nil {
 		hasPriority = false
 	}
 	responseType, _ := ParseResponse(string(ctx.Request.Header.Peek("RT-ResponseType")))
 
-	println(string(ctx.Response.Header.Peek("Accept-Encoding")))
-
 	requestHeaders := fasthttp.RequestHeader{}
 	ctx.Request.Header.CopyTo(&requestHeaders)
 
+	requestHeaders.Set("Accept-Encoding", "gzip, deflate, br")
+	requestHeaders.Set("User-Agent", fmt.Sprintf("restTunnel/%s; %s", VERSION, string(requestHeaders.Peek("User-Agent"))))
+
+	// Create a bucket with <HOST>:<PATH + AUTHORIZATION with SHA256>
+	URI := ctx.Request.URI()
+	pathHash := sha256.New()
+	pathHash.Write(URI.Path()[:])
+	pathHash.Write(requestHeaders.Peek("Authorization"))
+	initialBucketName := string(URI.Host()) + ":" + hex.EncodeToString(pathHash.Sum(nil))
+
+	// We then traverse the bucket incase it does not exist or it has an alias as some paths may use the same bucket
+	bucket, bucketStack, err := rt.TraverseBucket(initialBucketName)
+
+	var bucketName string
+	switch err {
+	case ErrBucketCircularAlias:
+		ctx.SetStatusCode(409)
+		res, err := json.Marshal(ErrorResponse{
+			Error:   fmt.Sprintf(err.Error(), initialBucketName, bucketStack),
+			Success: false,
+			Queued:  false,
+			UUID:    id,
+		})
+		if err != nil {
+			ctx.Write(res)
+		}
+		return
+	case ErrBucketDoesNotExist:
+		// Bucket will be created when request is completed so signify by leaving it blank
+		bucketName = ""
+	default:
+		bucketName = bucket.name
+	}
+
 	tunnelRequest := TunnelRequest{
-		ID: uuid.New(),
+		ID: id,
+
+		URI:     ctx.Request.RequestURI(),
+		Headers: &requestHeaders,
 
 		ResponseType: responseType,
 		Priority:     hasPriority,
 
-		Bucket: "",
+		Bucket: bucketName,
 
 		Callback: make(chan bool),
 	}
@@ -106,13 +289,15 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 // TraverseBucket returns the origional bucket from the bucket alias.
 // Returns current bucket, slice of buckets traversed through and error.
 func (rt *RestTunnel) TraverseBucket(bucketStr string) (bucket *Bucket, bucketStack []string, err error) {
+	rt.bucketsMu.RLock()
+	defer rt.bucketsMu.RUnlock()
+
 	stack := make(map[string]bool)
 	for {
+		bucketStack = append(bucketStack, bucketStr)
 		if _, ok := stack[bucketStr]; ok {
 			return nil, bucketStack, ErrBucketCircularAlias
 		}
-
-		bucketStack = append(bucketStack, bucketStr)
 		stack[bucketStr] = true
 		bucket, ok := rt.Buckets[bucketStr]
 		if !ok {

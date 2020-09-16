@@ -1,13 +1,14 @@
 package main
 
 import (
+	resttunnel "../internal"
 	"github.com/valyala/fasthttp"
-	RestTunnel "github.com/TheRockettek/RestTunnel/internal"
 )
 
 func main() {
-	restTunnel := RestTunnel{}
-	err := fasthttp.ListenAndServe("0.0.0.0:80", restTunnel.HandleRequest)
+	restTunnel := resttunnel.RestTunnel{}
+	println("Listening on tunnel")
+	err := fasthttp.ListenAndServe("0.0.0.0:8000", restTunnel.HandleRequest)
 	if err != nil {
 		println(err.Error())
 	}

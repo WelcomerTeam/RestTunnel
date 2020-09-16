@@ -48,6 +48,7 @@ func ParseResponse(responseStr string) (ResponseType, error) {
 type TunnelRequest struct {
 	ID uuid.UUID
 
+	URI     []byte
 	Headers *fasthttp.RequestHeader
 
 	ResponseType ResponseType

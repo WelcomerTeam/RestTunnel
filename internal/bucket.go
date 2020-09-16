@@ -12,7 +12,7 @@ import (
 var ErrBucketDoesNotExist = xerrors.New("Bucket '%s' does not exist")
 
 // ErrBucketCircularAlias is raised when a bucket references itself down a stack
-var ErrBucketCircularAlias = xerrors.New("Bucket '%s' references itself in bucket '%s'")
+var ErrBucketCircularAlias = xerrors.New("Bucket '%s' references itself. Stack: %v")
 
 // Bucket represents a ratelimit bucket
 type Bucket struct {
