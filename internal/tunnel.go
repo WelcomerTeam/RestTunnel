@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,9 @@ import (
 
 // VERSION respects semantic versioning
 const VERSION = "0.1"
+
+// CallbackExpiration is the duration a callback can exist before it is treated as stale and removed
+const CallbackExpiration = time.Minute * 2
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
@@ -100,7 +104,11 @@ type ErrorResponse struct {
 // NewTunnel creates a RestTunnel instance
 func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 
+	ctx, cancel := context.WithCancel(context.Background())
 	rt = &RestTunnel{
+		ctx:    ctx,
+		cancel: cancel,
+
 		Logger: zerolog.New(logger).With().Timestamp().Logger(),
 		Start:  time.Now().UTC(),
 
@@ -108,8 +116,10 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 			Name:                          "RestTunnel",
 			NoDefaultUserAgentHeader:      true,
 			DisableHeaderNamesNormalizing: true,
+			MaxIdleConnDuration:           time.Second * 5,
+			ReadTimeout:                   time.Second * 5,
+			WriteTimeout:                  time.Second * 5,
 		},
-
 		bucketsMu: sync.RWMutex{},
 		Buckets:   make(map[string]*Bucket),
 
@@ -117,12 +127,82 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 		Queues:   make(map[string]*Queue),
 
 		callbacksMu: sync.RWMutex{},
-		Callbacks:   make(map[string]*TunnelResponse),
+		Callbacks:   make(map[uuid.UUID]*TunnelResponse),
 	}
+	return
 }
 
 // HandleQueueJob handles a TunnelRequest gathered from a queue
 func (rt *RestTunnel) HandleQueueJob(tr *TunnelRequest) {
+
+	// This goroutine shows a job that is taking too long.
+	stage := "init"
+	fin := make(chan bool)
+	go func() {
+		waitTime := time.Second * 5
+		since := time.Now()
+		t := time.NewTimer(waitTime)
+		for {
+			select {
+			case <-fin:
+				return
+			case <-t.C:
+				rt.Logger.Warn().Str("stage", stage).Msgf("Job for %s has been in stage '%s' for too long. Been executing for %f seconds. Possible deadlock?", string(tr.URI), stage, time.Now().Sub(since).Round(time.Second).Seconds())
+				t.Reset(waitTime)
+			}
+		}
+	}()
+	defer func() {
+		close(fin)
+	}()
+
+	stage = "aqrq"
+	req := fasthttp.AcquireRequest()
+	req.SetRequestURIBytes(tr.URI)
+
+	stage = "hdrs"
+	tr.Headers.VisitAll(func(key []byte, value []byte) {
+		req.Header.SetBytesKV(key, value)
+	})
+
+	stage = "bckt"
+	rt.bucketsMu.RLock()
+	bucket := rt.Buckets[tr.Bucket]
+	rt.bucketsMu.RUnlock()
+
+	hit := bucket.Lock()
+
+	stage = "aqrs"
+	resp := fasthttp.AcquireResponse()
+
+	stage = "dorq"
+	err := rt.HTTP.Do(req, resp)
+
+	// Parse discord ratelimit headers
+
+	if resp.Header.Peek("a") {
+
+	}
+
+	tunnelResponse := &TunnelResponse{
+		expiration: time.Now().UTC().Add(CallbackExpiration),
+
+		ID:           tr.ID,
+		RatelimitHit: hit,
+		Response:     resp,
+		Error:        err,
+	}
+
+	stage = "clbk"
+	rt.callbacksMu.Lock()
+	rt.Callbacks[tr.ID] = tunnelResponse
+	rt.callbacksMu.Unlock()
+
+	stage = "chan"
+	if tr.ResponseType == RepondWithResponse {
+		tr.Callback <- true
+	}
+	stage = "done"
 }
 
 // SetQueueCount changes how many queue jobs are running
@@ -152,10 +232,11 @@ func (rt *RestTunnel) StartQueueJob(q *Queue) {
 	q.JobsActive.Add(1)
 	defer func() {
 		q.JobsActive.Done()
-		atomic.AddInt64(q.TotalJobsActive, 1)
+		atomic.AddInt64(q.TotalJobsActive, -1)
 	}()
 
 	for {
+		timeout := time.NewTicker(time.Second * 5)
 		// Gives channel PriorityEvents priority
 		select {
 		case tr := <-q.PriorityEvents:
@@ -173,13 +254,17 @@ func (rt *RestTunnel) StartQueueJob(q *Queue) {
 			atomic.AddInt64(q.JobsHandled, 1)
 			rt.HandleQueueJob(tr)
 			continue
+		case <-timeout.C:
+			return
 		case <-q.JobClosure:
 			return
 		}
 	}
 }
 
-// BalanceQueueJobs is the task that ensures that the queue is able to keep up
+// BalanceQueueJobs is the task that ensures that the queue is able to keep up.
+// This might not even be used as a QueueJob is made for each endpoint so its
+// unlikely a single endpoint will get overwhelmed.
 func (rt *RestTunnel) BalanceQueueJobs(q *Queue) {
 	// Duration how long we should account for
 	preserveTime := time.Minute
@@ -218,11 +303,18 @@ func (rt *RestTunnel) BalanceQueueJobs(q *Queue) {
 		println("Expected jobs needed", jobsNeeded, "scale of", jobScale)
 		println("Minimum", math.Floor(minuteHandle/float64(minEventsPerJob)))
 		println("Chose", actualJobsNeeded)
+
+		rt.SetQueueCount(q, actualJobsNeeded)
 	}
 }
 
 // HandleRequest handles a HTTP request given to RestTunnel
 func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
+	startTime := time.Now().UTC()
+	defer func() {
+		rt.Logger.Debug().Msgf("Finished request in %d ms", time.Now().UTC().Sub(startTime).Milliseconds())
+	}()
+
 	id := uuid.New()
 
 	hasPriority, err := strconv.ParseBool(string(ctx.Request.Header.Peek("RT-Priority")))
@@ -231,6 +323,21 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 	}
 	responseType, _ := ParseResponse(string(ctx.Request.Header.Peek("RT-ResponseType")))
 
+	requestURI := ctx.Request.Header.Peek("RT-URL")
+	if len(requestURI) == 0 {
+		ctx.SetStatusCode(400)
+		return
+	}
+
+	URI := fasthttp.AcquireURI()
+	err = URI.Parse(nil, requestURI)
+	if err != nil {
+		ctx.SetStatusCode(400)
+		return
+	}
+
+	rt.Logger.Debug().Str("response", responseType.String()).Bool("priority", hasPriority).Msg("Received request")
+
 	requestHeaders := fasthttp.RequestHeader{}
 	ctx.Request.Header.CopyTo(&requestHeaders)
 
@@ -238,7 +345,6 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 	requestHeaders.Set("User-Agent", fmt.Sprintf("restTunnel/%s; %s", VERSION, string(requestHeaders.Peek("User-Agent"))))
 
 	// Create a bucket with <HOST>:<PATH + AUTHORIZATION with SHA256>
-	URI := ctx.Request.URI()
 	pathHash := sha256.New()
 	pathHash.Write(URI.Path()[:])
 	pathHash.Write(requestHeaders.Peek("Authorization"))
@@ -247,7 +353,15 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 	// We then traverse the bucket incase it does not exist or it has an alias as some paths may use the same bucket
 	bucket, bucketStack, err := rt.TraverseBucket(initialBucketName)
 
+	if err != nil {
+		rt.Logger.Debug().Err(err).Msgf("Bucket '%s' does not exist yet", initialBucketName)
+	} else {
+		rt.Logger.Debug().Str("bucket", bucket.name).Msgf("Traversed bucket: %v", bucketStack)
+	}
+
 	var bucketName string
+	var queue *Queue
+
 	switch err {
 	case ErrBucketCircularAlias:
 		ctx.SetStatusCode(409)
@@ -263,27 +377,149 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 		return
 	case ErrBucketDoesNotExist:
 		// Bucket will be created when request is completed so signify by leaving it blank
-		bucketName = ""
+		bucketName = initialBucketName
 	default:
 		bucketName = bucket.name
 	}
 
+	// Create bucket if it does not exist
+	rt.bucketsMu.Lock()
+	if _, ok := rt.Buckets[bucketName]; !ok {
+		rt.Logger.Debug().Msgf("Creating bucket '%s'", bucketName)
+		bucket = CreateBucket(bucketName, 1, time.Second)
+		rt.Buckets[bucketName] = bucket
+	}
+	rt.bucketsMu.Unlock()
+
+	// Initialize queue if it does not exist
+	rt.queuesMu.Lock()
+	if _, ok := rt.Queues[bucketName]; !ok {
+		rt.Logger.Debug().Msgf("Creating queue '%s'", bucketName)
+		queue = &Queue{
+			BalancerActive:  abool.New(),
+			TotalJobsActive: new(int64),
+			JobsActive:      &sync.WaitGroup{},
+			JobClosure:      make(chan bool),
+			JobsHandled:     new(int64),
+			Bucket:          bucket,
+			events:          new(int64),
+			priority:        new(int64),
+			PriorityEvents:  make(chan *TunnelRequest, 64),
+			Events:          make(chan *TunnelRequest, 64),
+		}
+		rt.Queues[bucketName] = queue
+	} else {
+		queue = rt.Queues[bucketName]
+	}
+	rt.queuesMu.Unlock()
+
 	tunnelRequest := TunnelRequest{
 		ID: id,
 
-		URI:     ctx.Request.RequestURI(),
+		URI:     URI.FullURI(),
 		Headers: &requestHeaders,
 
 		ResponseType: responseType,
 		Priority:     hasPriority,
 
-		Bucket: bucketName,
-
+		Bucket:   bucketName,
 		Callback: make(chan bool),
 	}
 
-	tunnelRequest.Bucket = "A"
+	// If the queue we have added to has no jobs running, start a job
+	if totalJobs := atomic.LoadInt64(queue.TotalJobsActive); totalJobs == 0 {
+		rt.Logger.Debug().Msgf("Creating job for queue '%s'", bucketName)
+		go rt.StartQueueJob(queue)
+	}
 
+	queueEvent := func() {
+		if hasPriority {
+			queue.PriorityEvents <- &tunnelRequest
+		} else {
+			queue.Events <- &tunnelRequest
+		}
+	}
+
+	if responseType == NoResponse {
+		go queueEvent()
+		return
+	}
+
+	queueEvent()
+
+	// RestTunnel-UUID: UUID of Request
+	// RestTunnel-Ratelimit-Hit: True if a ratelimit occured
+	// RestTunnel-Ratelimit-Bucket: Name of the final bucket that was used
+	// RestTunnel-Ratelimit-Buckets: Name of all traversed buckets (seperated by ;) origional;alias;alias;final
+
+	ctx.Response.Header.Set("RT-Hit", "false")
+
+	switch responseType {
+	case RepondWithResponse:
+		// Wait for the callback channel to say the request has been completed then
+		// retrieve from callbacks and remove.
+		rt.Logger.Debug().Msg("Waiting for callback")
+		<-tunnelRequest.Callback
+		rt.Logger.Debug().Msg("Received callback")
+
+		rt.callbacksMu.RLock()
+		tunnelResponse, ok := rt.Callbacks[tunnelRequest.ID]
+		close(tunnelRequest.Callback)
+		delete(rt.Callbacks, tunnelRequest.ID)
+		rt.callbacksMu.RUnlock()
+
+		if !ok {
+			rt.Logger.Warn().Msg("Received callback but not in callback table. Ignoring...")
+		} else {
+			ctx.Response.Header.Set("RT-Hit", strconv.FormatBool(tunnelResponse.RatelimitHit))
+
+			tunnelResponse.Response.Header.VisitAll(func(key []byte, value []byte) {
+				ctx.Response.Header.SetBytesKV(key, value)
+			})
+			ctx.Response.ResetBody()
+
+			contentEncoding := string(tunnelResponse.Response.Header.Peek("Content-Encoding"))
+			body := tunnelResponse.Response.Body()
+
+			// Decode the body using the Content-Encoding header
+			for _, encoding := range strings.Split(contentEncoding, ";") {
+				switch encoding {
+				case "gzip":
+					body, err = tunnelResponse.Response.BodyGunzip()
+					if err != nil {
+						rt.Logger.Error().Err(err).Msg("Failed to Gunzip body")
+					}
+					continue
+				case "deflate":
+					body, err = tunnelResponse.Response.BodyInflate()
+					if err != nil {
+						rt.Logger.Error().Err(err).Msg("Failed to Inflate body")
+					}
+					continue
+				case "br":
+					body, err = tunnelResponse.Response.BodyUnbrotli()
+					if err != nil {
+						rt.Logger.Error().Err(err).Msg("Failed to Unbrotli body")
+					}
+					continue
+				default:
+					rt.Logger.Warn().Msgf("Unexpected encoding '%s'", encoding)
+				}
+			}
+			ctx.Write(body)
+			ctx.SetStatusCode(tunnelResponse.Response.StatusCode())
+		}
+	case RespondWithUUIDCallback:
+		// We do not need to do anything as it is automatically added to the callbacks.
+		// Return redirect to callback page
+		ctx.Redirect("/callbacks/"+tunnelRequest.ID.String(), 303)
+	}
+
+	ctx.Response.Header.Set("RT-UUID", tunnelRequest.ID.String())
+	ctx.Response.Header.Set("RT-Bucket", tunnelRequest.Bucket)
+	ctx.Response.Header.Set("RT-Buckets", strings.Join(bucketStack, ";"))
+
+	return
 }
 
 // TraverseBucket returns the origional bucket from the bucket alias.
@@ -299,17 +535,18 @@ func (rt *RestTunnel) TraverseBucket(bucketStr string) (bucket *Bucket, bucketSt
 			return nil, bucketStack, ErrBucketCircularAlias
 		}
 		stack[bucketStr] = true
+
 		bucket, ok := rt.Buckets[bucketStr]
 		if !ok {
 			return nil, bucketStack, ErrBucketDoesNotExist
 		}
+
 		if bucket.alias != "" && bucket.alias != bucket.name {
 			bucketStr = bucket.alias
 		} else {
-			break
+			return bucket, bucketStack, nil
 		}
 	}
-	return
 }
 
 // Utilised Headers

@@ -1,6 +1,8 @@
 package resttunnel
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/xerrors"
@@ -54,19 +56,16 @@ type TunnelRequest struct {
 	ResponseType ResponseType
 	Priority     bool
 
-	Bucket string
-
-	Response *TunnelResponse
+	Bucket   string
 	Callback chan bool
 }
 
 // TunnelResponse represents a RestTunnel response
 type TunnelResponse struct {
-	ID uuid.UUID
+	expiration time.Time
 
-	RatelimitHit     bool
-	RatelimitBucket  string
-	RatelimitBuckets []string
-
-	Response *fasthttp.Response
+	ID           uuid.UUID
+	RatelimitHit bool
+	Response     *fasthttp.Response
+	Error        error
 }
