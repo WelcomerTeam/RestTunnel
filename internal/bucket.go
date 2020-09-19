@@ -21,6 +21,10 @@ type Bucket struct {
 	name  string
 	alias string
 
+	// When handling the bucket lock, make sure you check the global bucket if it has
+	// been defined.
+	global string
+
 	limit     *int32
 	duration  *int64
 	ResetsAt  *int64
@@ -28,10 +32,12 @@ type Bucket struct {
 }
 
 // CreateBucket creates a new bucket
-func CreateBucket(name string, limit int32, duration time.Duration) (b *Bucket) {
+func CreateBucket(name string, limit int32, duration time.Duration, alias string, global string) (b *Bucket) {
 	nanos := duration.Nanoseconds()
 	return &Bucket{
 		name:     name,
+		alias:    alias,
+		global:   global,
 		limit:    &limit,
 		duration: &nanos,
 
@@ -63,4 +69,22 @@ func (b *Bucket) Lock() (hit bool) {
 
 	atomic.AddInt32(b.Available, -1)
 	return
+}
+
+// Exhaust removes all availables and changes the ResetAfter
+func (b *Bucket) Exhaust(reset int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	atomic.StoreInt32(b.Available, 0)
+	atomic.StoreInt64(b.ResetsAt, reset)
+}
+
+// Modify modifies the Limit, Duration etc
+func (b *Bucket) Modify(limit int32, duration int64, alias string, global string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.alias = alias
+	b.global = global
+	atomic.StoreInt32(b.limit, limit)
+	atomic.StoreInt64(b.duration, duration)
 }

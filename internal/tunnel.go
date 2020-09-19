@@ -28,6 +28,11 @@ const CallbackExpiration = time.Minute * 2
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
+var discordDomains = map[string]bool{
+	"discord.com":    true,
+	"discordapp.com": true,
+}
+
 // TunnelConfiguration represents the configuration for RestTunnel
 type TunnelConfiguration struct {
 	Host string `json:"host" yaml:"host"`
@@ -113,12 +118,12 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 		Start:  time.Now().UTC(),
 
 		HTTP: &fasthttp.Client{
-			Name:                          "RestTunnel",
-			NoDefaultUserAgentHeader:      true,
-			DisableHeaderNamesNormalizing: true,
-			MaxIdleConnDuration:           time.Second * 5,
-			ReadTimeout:                   time.Second * 5,
-			WriteTimeout:                  time.Second * 5,
+			Name:                     "RestTunnel",
+			NoDefaultUserAgentHeader: true,
+			MaxIdleConnDuration:      time.Second * 5,
+			MaxConnDuration:          time.Second * 5,
+			ReadTimeout:              time.Second * 5,
+			WriteTimeout:             time.Second * 5,
 		},
 		bucketsMu: sync.RWMutex{},
 		Buckets:   make(map[string]*Bucket),
@@ -165,23 +170,108 @@ func (rt *RestTunnel) HandleQueueJob(tr *TunnelRequest) {
 		req.Header.SetBytesKV(key, value)
 	})
 
-	stage = "bckt"
+	// Asks discord to send higher precision reset times
+	req.Header.Set("X-RateLimit-Precision", "millisecond")
+
+	var resp *fasthttp.Response
+	var hit bool
+	var err error
+
 	rt.bucketsMu.RLock()
 	bucket := rt.Buckets[tr.Bucket]
+	var globalBucket *Bucket
+	if bucket.global != "" {
+		globalBucket = rt.Buckets[bucket.global]
+	}
 	rt.bucketsMu.RUnlock()
 
-	hit := bucket.Lock()
+	for {
+		stage = "bckt"
 
-	stage = "aqrs"
-	resp := fasthttp.AcquireResponse()
+		hit = bucket.Lock()
+		if bucket.global != "" {
+			hit = globalBucket.Lock() || hit
+		}
 
-	stage = "dorq"
-	err := rt.HTTP.Do(req, resp)
+		stage = "aqrs"
+		resp = fasthttp.AcquireResponse()
 
-	// Parse discord ratelimit headers
+		stage = "dorq"
+		err = rt.HTTP.Do(req, resp)
 
-	if resp.Header.Peek("a") {
+		println(resp.StatusCode())
+		stage = "rtlm"
+		if resp.StatusCode() == 429 {
+			// ratelimit
+			global, err := strconv.ParseBool(string(resp.Header.Peek("X-RateLimit-Global")))
+			if err == nil && global {
+				// Global
+				rt.Logger.Warn().Msg("Got global ratelimit")
+				if bucket.global != "" {
+					retryAfter, err := strconv.Atoi(string(resp.Header.Peek("Retry-After")))
+					if err != nil {
+						// Convert ms to ns (x1e6)
+						globalBucket.Exhaust(time.Now().UnixNano() + int64(retryAfter*1000000))
+					}
+				} else {
+					rt.Logger.Warn().Str("bucket", bucket.name).Msg("Got global ratelimit but i dont have a global bucket set.")
+				}
+			} else {
+				// We ignore X-RateLimit-Reset as we already have Reset-Afdter
+				rt.Logger.Warn().Msg("Got endpoint ratelimit")
+				rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
+				if err != nil {
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", string(resp.Header.Peek("X-RateLimit-Limit")))
+				}
+				rlResetRaw, err := strconv.ParseFloat(string(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
+				if err != nil {
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", string(resp.Header.Peek("X-RateLimit-Reset-After")))
+				}
+				rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
+				// If we have received 429 we already know it is 0
+				// rlRemaining, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Remaining")))
+				// if err != nil {
+				// 	rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
+				// }
 
+				// Convert seconds to nanoseconds (x1e9) (we add on about 500ms just incase)
+				rlReset := time.Now().UnixNano() + int64(rlResetRaw*float64(1000000000)) + 500000000
+				bucket.Exhaust(rlReset)
+				bucket.Modify(int32(rlLimit), atomic.LoadInt64(bucket.duration), rlBucket, bucket.global)
+			}
+		} else {
+			rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
+			rt.Logger.Debug().Msgf("Received bucket '%s'", rlBucket)
+			if rlBucket != bucket.alias && rlBucket != "" {
+				rt.Logger.Info().Msgf("Discovered alias bucket '%s' for '%s'", rlBucket, bucket.name)
+				bucket.Modify(
+					atomic.LoadInt32(bucket.limit),
+					atomic.LoadInt64(bucket.duration),
+					rlBucket,
+					bucket.global,
+				)
+			}
+
+			rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
+			if err != nil {
+				rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", string(resp.Header.Peek("X-RateLimit-Limit")))
+			}
+			rlRemaining, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Remaining")))
+			if err != nil {
+				rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
+			}
+			rlReset, err := strconv.ParseFloat(string(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
+			if err != nil {
+				rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", string(resp.Header.Peek("X-RateLimit-Reset-After")))
+			}
+
+			if rlRemaining == rlLimit-1 {
+				// We have just received a new RateLimit so we can now infer the ratelimit
+				bucket.Modify(int32(rlLimit), time.Duration(rlReset*1000000000).Nanoseconds(), rlBucket, bucket.global)
+			}
+
+			break
+		}
 	}
 
 	tunnelResponse := &TunnelResponse{
@@ -382,12 +472,26 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 		bucketName = bucket.name
 	}
 
+	globalBucket := ""
+
+	// We will create a global ratelimiter when we attempt to use a discord API
+	if IsDiscordAPIURI(URI) {
+		pathHash := sha256.New()
+		pathHash.Write(requestHeaders.Peek("Authorization"))
+		globalBucket = hex.EncodeToString(pathHash.Sum(nil))
+	}
+
 	// Create bucket if it does not exist
 	rt.bucketsMu.Lock()
 	if _, ok := rt.Buckets[bucketName]; !ok {
 		rt.Logger.Debug().Msgf("Creating bucket '%s'", bucketName)
-		bucket = CreateBucket(bucketName, 1, time.Second)
+		bucket = CreateBucket(bucketName, 5, time.Second*5, "", globalBucket)
 		rt.Buckets[bucketName] = bucket
+	}
+	if _, ok := rt.Buckets[globalBucket]; !ok {
+		rt.Logger.Debug().Msgf("Creating global bucket '%s'", globalBucket)
+		bucket = CreateBucket(globalBucket, 50, time.Second, "", "")
+		rt.Buckets[globalBucket] = bucket
 	}
 	rt.bucketsMu.Unlock()
 
@@ -478,34 +582,8 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 			})
 			ctx.Response.ResetBody()
 
-			contentEncoding := string(tunnelResponse.Response.Header.Peek("Content-Encoding"))
-			body := tunnelResponse.Response.Body()
+			body, _ := rt.DecodeBody(tunnelResponse.Response)
 
-			// Decode the body using the Content-Encoding header
-			for _, encoding := range strings.Split(contentEncoding, ";") {
-				switch encoding {
-				case "gzip":
-					body, err = tunnelResponse.Response.BodyGunzip()
-					if err != nil {
-						rt.Logger.Error().Err(err).Msg("Failed to Gunzip body")
-					}
-					continue
-				case "deflate":
-					body, err = tunnelResponse.Response.BodyInflate()
-					if err != nil {
-						rt.Logger.Error().Err(err).Msg("Failed to Inflate body")
-					}
-					continue
-				case "br":
-					body, err = tunnelResponse.Response.BodyUnbrotli()
-					if err != nil {
-						rt.Logger.Error().Err(err).Msg("Failed to Unbrotli body")
-					}
-					continue
-				default:
-					rt.Logger.Warn().Msgf("Unexpected encoding '%s'", encoding)
-				}
-			}
 			ctx.Write(body)
 			ctx.SetStatusCode(tunnelResponse.Response.StatusCode())
 		}
@@ -547,6 +625,44 @@ func (rt *RestTunnel) TraverseBucket(bucketStr string) (bucket *Bucket, bucketSt
 			return bucket, bucketStack, nil
 		}
 	}
+}
+
+// DecodeBody returns a decoded fasthttp.Responce body using the
+// Content-Encoding header
+func (rt *RestTunnel) DecodeBody(resp *fasthttp.Response) (body []byte, err error) {
+	contentEncoding := string(resp.Header.Peek("Content-Encoding"))
+	body = resp.Body()
+
+	if contentEncoding == "" {
+		return body, nil
+	}
+
+	// Decode the body using the Content-Encoding header
+	for _, encoding := range strings.Split(contentEncoding, ";") {
+		switch encoding {
+		case "gzip":
+			body, err = resp.BodyUnbrotli()
+			if err != nil {
+				rt.Logger.Error().Err(err).Msg("Failed to Gunzip body")
+			}
+			continue
+		case "deflate":
+			body, err = resp.BodyInflate()
+			if err != nil {
+				rt.Logger.Error().Err(err).Msg("Failed to Inflate body")
+			}
+			continue
+		case "br":
+			body, err = resp.BodyUnbrotli()
+			if err != nil {
+				rt.Logger.Error().Err(err).Msg("Failed to Unbrotli body")
+			}
+			continue
+		default:
+			rt.Logger.Warn().Msgf("Unexpected encoding '%s'", encoding)
+		}
+	}
+	return body, err
 }
 
 // Utilised Headers

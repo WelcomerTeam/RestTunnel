@@ -69,3 +69,11 @@ type TunnelResponse struct {
 	Response     *fasthttp.Response
 	Error        error
 }
+
+// RateLimitResponse represents the structure of a ratelimit
+// message from discord
+type RateLimitResponse struct {
+	Message    string        `json:"message"`
+	RetryAfter time.Duration `json:"retry_after"`
+	Global     bool          `json:"global"`
+}
