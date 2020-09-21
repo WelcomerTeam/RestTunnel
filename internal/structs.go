@@ -46,6 +46,11 @@ func ParseResponse(responseStr string) (ResponseType, error) {
 	return RepondWithResponse, xerrors.Errorf("Unknown ResponseType String: '%s', defaulting to RespondWithResponse", responseStr)
 }
 
+// AliveResponse represents the response to /alive
+type AliveResponse struct {
+	Version string `json:"version"`
+}
+
 // TunnelRequest represents a RestTunnel request
 type TunnelRequest struct {
 	ID uuid.UUID

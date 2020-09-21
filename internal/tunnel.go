@@ -854,6 +854,13 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("RT-Bucket", tunnelRequest.Bucket)
 		ctx.Response.Header.Set("RT-Buckets", strings.Join(bucketStack, ";"))
 	default:
+		if strings.HasPrefix(path, "/alive") {
+			res, err := json.Marshal(AliveResponse{VERSION})
+			if err == nil {
+				ctx.Write(res)
+			}
+			return
+		}
 		if strings.HasPrefix(path, "/api/analytics") {
 			// rt.AnalyticsHit.RunOnce(now)
 			// rt.AnalyticsMiss.RunOnce(now)
@@ -1006,7 +1013,6 @@ func (rt *RestTunnel) DecodeBody(resp *fasthttp.Response) (body []byte, err erro
 		return body, nil
 	}
 
-	println(contentEncoding)
 	// Decode the body using the Content-Encoding header
 	for _, encoding := range strings.Split(contentEncoding, ";") {
 		switch encoding {
