@@ -1,0 +1,10 @@
+host: 127.0.0.1:8000
+logging:
+    console_logging: true
+    file_logging: true
+    encode_as_json: false
+    directory: logs
+    filename: resttunnel
+    max_size: 1024
+    max_backups: 16
+    max_age: 14

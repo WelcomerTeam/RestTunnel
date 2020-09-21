@@ -7,7 +7,6 @@ import (
 
 	resttunnel "github.com/TheRockettek/RestTunnel/internal"
 	"github.com/rs/zerolog"
-	"github.com/valyala/fasthttp"
 )
 
 func main() {
@@ -30,12 +29,11 @@ func main() {
 
 	restTunnel, err := resttunnel.NewTunnel(logger)
 	if err != nil {
-		log.Fatal().Err(err).Send()
+		log.Panic().Err(err).Msgf("Cannot create restTunnel: %s", err)
 	}
 
-	log.Info().Msg("Listening on tunnel")
-	err = fasthttp.ListenAndServe("0.0.0.0:8000", restTunnel.HandleRequest)
+	err = restTunnel.Open()
 	if err != nil {
-		log.Fatal().Err(err).Send()
+		log.Panic().Err(err).Msgf("Cannot open restTunnel: %s", err)
 	}
 }
