@@ -210,7 +210,7 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 		for {
 			select {
 			case <-e.C:
-				now := time.Now().UTC()
+				now := time.Now().UTC().Round(time.Second)
 				if analyticsRequests := atomic.LoadInt64(rt.analyticsRequests); analyticsRequests == 0 {
 					rt.AnalyticsAverageResponse.IncrementBy(0)
 				} else {
@@ -598,8 +598,7 @@ func createLineChart(ac *Accumulator, background string, border string) (chart L
 		data = append(data, DataStamp{sample.StoredAt, sample.Value})
 	}
 	chart = LineChart{
-		Labels: []string{ac.Label},
-		Datasets: []Dataset{Dataset{
+		Datasets: []Dataset{{
 			Label:            ac.Label,
 			BackgroundColour: background,
 			BorderColour:     border,
@@ -878,12 +877,14 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 			background, border := "rgba(149, 165, 165, 0.5)", "#7E8C8D"
 			ar.Charts.Hits = createLineChart(rt.AnalyticsHit, background, border)
 			ar.Charts.Misses = createLineChart(rt.AnalyticsMiss, background, border)
+			ar.Charts.Waiting = createLineChart(rt.AnalyticsWaiting, background, border)
 			ar.Charts.Requests = createLineChart(rt.AnalyticsRequests, background, border)
 			ar.Charts.Callbacks = createLineChart(rt.AnalyticsCallbacks, background, border)
 			ar.Charts.AverageResponse = createLineChart(rt.AnalyticsAverageResponse, background, border)
 
 			ar.Numbers.Hits = rt.AnalyticsHit.GetAllSamples().Sum()
 			ar.Numbers.Misses = rt.AnalyticsMiss.GetAllSamples().Sum()
+			ar.Numbers.Waiting = rt.AnalyticsWaiting.GetAllSamples().Sum()
 			ar.Numbers.Requests = rt.AnalyticsRequests.GetAllSamples().Sum()
 
 			res, err := json.Marshal(ar)
