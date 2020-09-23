@@ -48,6 +48,7 @@ func ParseResponse(responseStr string) (ResponseType, error) {
 
 // AliveResponse represents the response to /alive
 type AliveResponse struct {
+	Name    string `json:"name"`
 	Version string `json:"version"`
 }
 

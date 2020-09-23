@@ -434,7 +434,7 @@ func (rt *RestTunnel) HandleQueueJob(tr *TunnelRequest) {
 			if rlBucket != "" {
 				rt.Logger.Debug().Msgf("Received bucket '%s'", rlBucket)
 				if rlBucket != bucket.alias && rlBucket != "" {
-					rt.Logger.Info().Msgf("Discovered alias bucket '%s' for '%s'", rlBucket, bucket.name)
+					rt.Logger.Debug().Msgf("Discovered alias bucket '%s' for '%s'", rlBucket, bucket.name)
 					bucket.Modify(
 						atomic.LoadInt32(bucket.limit),
 						atomic.LoadInt64(bucket.duration),
@@ -625,6 +625,10 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 				ctx.Response.StatusCode(),
 				ms)
 		} else {
+			rt.Logger.Info().Msgf("Tunnel: %s %s %dms",
+				ctx.Request.Header.Method(),
+				ctx.Request.Header.Peek("RT-URL"),
+				ms)
 			atomic.AddInt64(rt.analyticsResponseTotal, ms)
 			atomic.AddInt64(rt.analyticsRequests, 1)
 		}
@@ -854,7 +858,7 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("RT-Buckets", strings.Join(bucketStack, ";"))
 	default:
 		if strings.HasPrefix(path, "/alive") {
-			res, err := json.Marshal(AliveResponse{VERSION})
+			res, err := json.Marshal(AliveResponse{"RestTunnel", VERSION})
 			if err == nil {
 				ctx.Write(res)
 			}
