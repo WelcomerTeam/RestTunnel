@@ -617,7 +617,7 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 		ms := time.Now().UTC().Sub(startTime).Milliseconds()
 		// Only log if they have not requested / and only
 		// count response time if they have requested /
-		if path != "/api/analytics" {
+		if path == "/api/analytics" {
 			return
 		}
 
