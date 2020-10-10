@@ -288,8 +288,8 @@ func (rt *RestTunnel) Open() (err error) {
 	rt.Logger.Info().Msgf("Starting RestTunnel\n\n    ______________________   \n   /                      \\  \n  /  ____________________  \\ 	   RestTunnel %s\n |  / \\_              _/ \\  |\n |  |   *\\_        _/*   |  |	   HTTP: %s\n |  |      \\      /      |  |\n |  |      *\\____/*      |  |	   %s\n |  |       |    |       |  |\n",
 		VERSION, rt.Configuration.Host, "You are being ratelimited")
 
-	err = fasthttp.ListenAndServe(rt.Configuration.Host, rt.HandleRequest)
 	fmt.Printf("Serving on %s (Press CTRL+C to quit)", rt.Configuration.Host)
+	err = fasthttp.ListenAndServe(rt.Configuration.Host, rt.HandleRequest)
 
 	return
 }
