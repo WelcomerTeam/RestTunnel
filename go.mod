@@ -3,6 +3,7 @@ module github.com/TheRockettek/RestTunnel
 go 1.14
 
 require (
+	github.com/BurntSushi/toml v0.3.1 // indirect
 	github.com/google/uuid v1.1.2
 	github.com/json-iterator/go v1.1.10
 	github.com/rs/zerolog v1.20.0
