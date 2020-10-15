@@ -122,7 +122,7 @@ type Queue struct {
 	// jobs active and only want 2 running, we send 2 booleans down JobClosure and if we
 	// wanted to add 1 more we would just create a Queue job normally. Reference
 	// TotalJobsActive for how many are active and use JobsActive to wait when closing
-	// a queue. BalancerActive signifys if the balancer is enabled and limits to only one
+	// a queue. BalancerActive signifies if the balancer is enabled and limits to only one
 	// being ran at a time. The balancer simply creates more queue jobs when necessary.
 	BalancerActive *abool.AtomicBool
 
@@ -406,7 +406,7 @@ func (rt *RestTunnel) HandleQueueJob(tr *TunnelRequest) {
 					rt.Logger.Warn().Str("bucket", bucket.name).Msg("Hit global ratelimit with global bucket set.")
 				}
 			} else {
-				// We ignore X-RateLimit-Reset as we already have Reset-Afdter
+				// We ignore X-RateLimit-Reset as we already have Reset-After
 				rt.Logger.Debug().Msg("Hit endpoint ratelimit")
 				rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
 				if err != nil {
@@ -423,7 +423,7 @@ func (rt *RestTunnel) HandleQueueJob(tr *TunnelRequest) {
 				// 	rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
 				// }
 
-				// Convert seconds to nanoseconds (x1e9) (we add on about 500ms just incase)
+				// Convert seconds to nanoseconds (x1e9) (we add on about 500ms just in case)
 				rlReset := time.Now().UnixNano() + int64(rlResetRaw*float64(1000000000)) + 500000000
 				bucket.Exhaust(rlReset)
 				bucket.Modify(int32(rlLimit), atomic.LoadInt64(bucket.duration), rlBucket, bucket.global)
@@ -481,7 +481,7 @@ func (rt *RestTunnel) HandleQueueJob(tr *TunnelRequest) {
 	rt.callbacksMu.Unlock()
 
 	stage = "chan"
-	if tr.ResponseType == RepondWithResponse {
+	if tr.ResponseType == RespondWithResponse {
 		tr.Callback <- true
 	}
 	stage = "done"
@@ -699,7 +699,7 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 		pathHash.Write(requestHeaders.Peek("Authorization"))
 		initialBucketName := string(URI.Host()) + ":" + hex.EncodeToString(pathHash.Sum(nil))
 
-		// We then traverse the bucket incase it does not exist or it has an alias as some paths may use the same bucket
+		// We then traverse the bucket in case it does not exist or it has an alias as some paths may use the same bucket
 		bucket, bucketStack, err := rt.TraverseBucket(initialBucketName)
 
 		if err != nil {
@@ -813,14 +813,14 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 		queueEvent()
 
 		// RestTunnel-UUID: UUID of Request
-		// RestTunnel-Ratelimit-Hit: True if a ratelimit occured
+		// RestTunnel-Ratelimit-Hit: True if a ratelimit occurred
 		// RestTunnel-Ratelimit-Bucket: Name of the final bucket that was used
-		// RestTunnel-Ratelimit-Buckets: Name of all traversed buckets (seperated by ;) origional;alias;alias;final
+		// RestTunnel-Ratelimit-Buckets: Name of all traversed buckets (separated by ;) original;alias;alias;final
 
 		ctx.Response.Header.Set("RT-Hit", "false")
 
 		switch responseType {
-		case RepondWithResponse:
+		case RespondWithResponse:
 			// Wait for the callback channel to say the request has been completed then
 			// retrieve from callbacks and remove.
 			<-tunnelRequest.Callback
@@ -985,7 +985,7 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 	return
 }
 
-// TraverseBucket returns the origional bucket from the bucket alias.
+// TraverseBucket returns the original bucket from the bucket alias.
 // Returns current bucket, slice of buckets traversed through and error.
 func (rt *RestTunnel) TraverseBucket(bucketStr string) (bucket *Bucket, bucketStack []string, err error) {
 	rt.bucketsMu.RLock()
@@ -1012,7 +1012,7 @@ func (rt *RestTunnel) TraverseBucket(bucketStr string) (bucket *Bucket, bucketSt
 	}
 }
 
-// DecodeBody returns a decoded fasthttp.Responce body using the
+// DecodeBody returns a decoded fasthttp.Response body using the
 // Content-Encoding header
 func (rt *RestTunnel) DecodeBody(resp *fasthttp.Response) (body []byte, err error) {
 	contentEncoding := string(resp.Header.Peek("Content-Encoding"))
@@ -1103,7 +1103,7 @@ func (rt *RestTunnel) LazyCallbackJob() {
 	}
 }
 
-// Utilised Headers
+// Utilized Headers
 // RestTunnel-URL: The url you are requesting
 // RestTunnel-Method: the response type that is wanted (response/callback/none) (defaults to response)
 // RestTunnel-Priority: boolean if the request is high priority
@@ -1111,16 +1111,16 @@ func (rt *RestTunnel) LazyCallbackJob() {
 
 // Response Headers
 // RestTunnel-Timing-Request: unix of request received
-// RestTunnel-Timing-Queued: unix of request added to queue/prioritised
+// RestTunnel-Timing-Queued: unix of request added to queue/prioritized
 // RestTunnel-Timing-Limited: unix of request waiting for ratelimit
 // RestTunnel-Timing-Executed: unix of when request was actually executed
 // RestTunnel-Timing-Completed: unix of when request was completed
 // (This might be cut down into either a single int with ms to complete all or split into waiting for cache, ratelimit and execution split with ;)
 
 // RestTunnel-UUID: UUID of Request
-// RestTunnel-Ratelimit-Hit: True if a ratelimit occured
+// RestTunnel-Ratelimit-Hit: True if a ratelimit occurred
 // RestTunnel-Ratelimit-Bucket: Name of the final bucket that was used
-// RestTunnel-Ratelimit-Buckets: Name of all traversed buckets (seperated by ;) origional;alias;alias;final
+// RestTunnel-Ratelimit-Buckets: Name of all traversed buckets (separated by ;) original;alias;alias;final
 
 // The process of handling a request with RestTunnel is fairly basic and is split
 // into multiple sections:
@@ -1134,13 +1134,13 @@ func (rt *RestTunnel) LazyCallbackJob() {
 //  When passing this type, RestTunnel will wait until the request has finished
 // 	before returning a response to the client.
 // -  RespondWithUUIDCallback
-// 	When passing this type, RestTunnel will return a UUID to the client reguardless
+// 	When passing this type, RestTunnel will return a UUID to the client regardless
 // 	if the event has been processed yet.
 // -  NoResponse
 // 	If passed, RestTunnel will simply acknowledge the request and process it without
 // 	disclosing its response or status to the client.
 
-// Ontop of providing how the response is given to the client, the client can also
+// On top of providing how the response is given to the client, the client can also
 // provide if the request is high priority. By specifying true to RestTunnel-Priority,
 // the execution of any other events are halted and the high priority request is
 // executed beforehand. If high priority is not provided, the request will be added to
@@ -1159,7 +1159,7 @@ func (rt *RestTunnel) LazyCallbackJob() {
 // which the TunnelRequest.Response is given to the client.
 
 // When receiving a RespondWithUUIDCallback, it will return the TunnelRequest UUID
-// to the client then execute the request seperately. It is up to the client to poll
+// to the client then execute the request separately. It is up to the client to poll
 // /callback/uuid or subscribe in gateway to retrieve the response.
 
 // The Queue has a dedicated task which will loop until there are no more requests

@@ -71,7 +71,7 @@ func (b *Bucket) Lock() (hit bool) {
 	return
 }
 
-// Exhaust removes all availables and changes the ResetAfter
+// Exhaust removes all available calls and modifies the ResetAfter
 func (b *Bucket) Exhaust(reset int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

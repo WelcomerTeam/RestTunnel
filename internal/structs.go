@@ -12,8 +12,8 @@ import (
 type ResponseType int8
 
 const (
-	// RepondWithResponse defines the client wants the response.
-	RepondWithResponse ResponseType = iota
+	// RespondWithResponse defines the client wants the response.
+	RespondWithResponse ResponseType = iota
 	// RespondWithUUIDCallback defines the client will want the response at a later time.
 	RespondWithUUIDCallback
 	// NoResponse defines the client does not want the response.
@@ -22,7 +22,7 @@ const (
 
 func (rt ResponseType) String() string {
 	switch rt {
-	case RepondWithResponse:
+	case RespondWithResponse:
 		return "RespondWithResponse"
 	case RespondWithUUIDCallback:
 		return "RespondWithUUIDCallback"
@@ -36,14 +36,14 @@ func (rt ResponseType) String() string {
 // returns an error if the input string does not match known values.
 func ParseResponse(responseStr string) (ResponseType, error) {
 	switch responseStr {
-	case RepondWithResponse.String():
-		return RepondWithResponse, nil
+	case RespondWithResponse.String():
+		return RespondWithResponse, nil
 	case RespondWithUUIDCallback.String():
 		return RespondWithUUIDCallback, nil
 	case NoResponse.String():
 		return NoResponse, nil
 	}
-	return RepondWithResponse, xerrors.Errorf("Unknown ResponseType String: '%s', defaulting to RespondWithResponse", responseStr)
+	return RespondWithResponse, xerrors.Errorf("Unknown ResponseType String: '%s', defaulting to RespondWithResponse", responseStr)
 }
 
 // AliveResponse represents the response to /alive
