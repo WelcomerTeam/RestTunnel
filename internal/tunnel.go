@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path"
 	"strconv"
@@ -48,8 +49,11 @@ var ErrCallbackDoesNotExist = "Callback '%s' does not exist"
 // Interval between each analytic sample
 const Interval = time.Second * 15
 
-// Samples to hold. 5 seconds and 720 samples is 1 hour
+// Samples to hold. 5 seconds and 72 samples is 1 hour
 const Samples = 720
+
+// MaxRedirects is the maximum number of redirects before is it not attempted again
+const MaxRedirects = 5
 
 // Known domains to lookup
 var discordDomains = map[string]bool{
@@ -501,7 +505,9 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 	}
 	rt.bucketsMu.RUnlock()
 
-	for {
+	requestDone := false
+main:
+	for i := 1; i < MaxRedirects; i++ {
 		stage = "bckt"
 
 		hit = _bucket.Lock()
@@ -523,7 +529,19 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 		rt.AnalyticsRequests.Increment()
 
 		stage = "rtlm"
-		if resp.StatusCode() == 429 {
+		status := resp.StatusCode()
+		switch {
+		case status >= 300 && status < 400:
+			location := resp.Header.Peek("Location")
+			if len(location) > 0 {
+				rt.Logger.Info().Str("location", string(location)).Msgf("Received %d status code and received location", status)
+				req.SetRequestURIBytes(location)
+			} else {
+				requestDone = true
+				break main
+			}
+		case status == http.StatusTooManyRequests:
+			requestDone = true
 			// ratelimit
 			global, err := strconv.ParseBool(string(resp.Header.Peek("X-RateLimit-Global")))
 			if err == nil && global {
@@ -561,7 +579,9 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 				_bucket.Exhaust(rlReset)
 				_bucket.Modify(int32(rlLimit), atomic.LoadInt64(_bucket.Duration), rlBucket, _bucket.Global)
 			}
-		} else {
+			break main
+		default:
+			requestDone = true
 			rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
 			// If we receive no X-RateLimit-Bucket it is likely not discord and we will just discard anyway
 			if rlBucket != "" {
@@ -594,8 +614,13 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 					_bucket.Modify(int32(rlLimit), time.Duration(rlReset*1000000000).Nanoseconds(), rlBucket, _bucket.Global)
 				}
 			}
-			break
+			break main
 		}
+	}
+
+	if !requestDone {
+		// TODO: Do something if there are too many redirects
+		rt.Logger.Warn().Str("URL", string(tr.URI)).Msg("Too many redirects")
 	}
 
 	close(tunnelResponse.CompleteC)
