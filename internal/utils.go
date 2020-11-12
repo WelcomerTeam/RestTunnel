@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"time"
 
+	accumulator "github.com/TheRockettek/RestTunnel/pkg/accumulator"
+	structs "github.com/TheRockettek/RestTunnel/structs"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 )
@@ -45,13 +47,13 @@ func DurationTimestamp(d time.Duration) (output string) {
 }
 
 // createLineChart creates a LineChart from an accumulator
-func createLineChart(ac *Accumulator, background string, border string) (chart LineChart) {
+func createLineChart(ac *accumulator.Accumulator, background string, border string) (chart structs.LineChart) {
 	data := make([]interface{}, 0, len(ac.Samples))
 	for _, sample := range ac.Samples {
-		data = append(data, DataStamp{sample.StoredAt, sample.Value})
+		data = append(data, structs.DataStamp{sample.StoredAt, sample.Value})
 	}
-	chart = LineChart{
-		Datasets: []Dataset{{
+	chart = structs.LineChart{
+		Datasets: []structs.Dataset{{
 			Label:            ac.Label,
 			BackgroundColour: background,
 			BorderColour:     border,
@@ -62,7 +64,7 @@ func createLineChart(ac *Accumulator, background string, border string) (chart L
 }
 
 // randomCallback returns a random callback from callbacks
-func (rt *RestTunnel) randomCallback() (k uuid.UUID, v *TunnelResponse) {
+func (rt *RestTunnel) randomCallback() (k uuid.UUID, v *structs.TunnelResponse) {
 	rt.callbacksMu.RLock()
 	defer rt.callbacksMu.RUnlock()
 

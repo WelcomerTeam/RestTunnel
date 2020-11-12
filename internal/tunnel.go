@@ -15,6 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	accumulator "github.com/TheRockettek/RestTunnel/pkg/accumulator"
+	bucket "github.com/TheRockettek/RestTunnel/pkg/bucket"
+	structs "github.com/TheRockettek/RestTunnel/structs"
 	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/rs/zerolog"
@@ -97,28 +100,28 @@ type RestTunnel struct {
 	HTTP *fasthttp.Client `json:"-"`
 
 	bucketsMu sync.RWMutex
-	Buckets   map[string]*Bucket `json:"buckets"`
+	Buckets   map[string]*bucket.Bucket `json:"buckets"`
 
 	queuesMu sync.RWMutex
 	Queues   map[string]*Queue `json:"queue"`
 
 	callbacksMu sync.RWMutex
-	Callbacks   map[uuid.UUID]*TunnelResponse `json:"callbacks"`
+	Callbacks   map[uuid.UUID]*structs.TunnelResponse `json:"callbacks"`
 
 	// Analytics for ratelimits
-	AnalyticsHit  *Accumulator
-	AnalyticsMiss *Accumulator
+	AnalyticsHit  *accumulator.Accumulator
+	AnalyticsMiss *accumulator.Accumulator
 
 	// Requests waiting and an atomic cache
-	AnalyticsWaiting *Accumulator
+	AnalyticsWaiting *accumulator.Accumulator
 	analyticsWaiting *int64
 
 	// Analytics for requests and callbacks buffer
-	AnalyticsRequests  *Accumulator
-	AnalyticsCallbacks *Accumulator
+	AnalyticsRequests  *accumulator.Accumulator
+	AnalyticsCallbacks *accumulator.Accumulator
 
 	// Uses total response time and requests to calculate average
-	AnalyticsAverageResponse *Accumulator
+	AnalyticsAverageResponse *accumulator.Accumulator
 	analyticsResponseTotal   *int64
 	analyticsRequests        *int64
 
@@ -127,18 +130,18 @@ type RestTunnel struct {
 
 // Queue represents a Deque with a priority queue
 type Queue struct {
-	expiration time.Time
+	Expiration time.Time
 
 	JobActive   *abool.AtomicBool
 	JobsHandled *int64
 
-	Bucket *Bucket
+	Bucket *bucket.Bucket
 
 	events   *int64
 	priority *int64
 
-	PriorityEvents chan *TunnelRequest
-	Events         chan *TunnelRequest
+	PriorityEvents chan *structs.TunnelRequest
+	Events         chan *structs.TunnelRequest
 }
 
 // ErrorResponse is the structure error messages are returned to by the client. We do not
@@ -169,13 +172,13 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 			WriteTimeout:             time.Second * 5,
 		},
 		bucketsMu: sync.RWMutex{},
-		Buckets:   make(map[string]*Bucket),
+		Buckets:   make(map[string]*bucket.Bucket),
 
 		queuesMu: sync.RWMutex{},
 		Queues:   make(map[string]*Queue),
 
 		callbacksMu: sync.RWMutex{},
-		Callbacks:   make(map[uuid.UUID]*TunnelResponse),
+		Callbacks:   make(map[uuid.UUID]*structs.TunnelResponse),
 
 		analyticsWaiting:       new(int64),
 		analyticsResponseTotal: new(int64),
@@ -191,20 +194,14 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 	}
 	rt.Configuration = configuration
 
-	rt.AnalyticsHit = NewAccumulator(rt.ctx, Samples, Interval)
-	rt.AnalyticsHit.Label = "Ratelimit Hits"
-	rt.AnalyticsMiss = NewAccumulator(rt.ctx, Samples, Interval)
-	rt.AnalyticsMiss.Label = "Ratelimit Misses"
-	rt.AnalyticsRequests = NewAccumulator(rt.ctx, Samples, Interval)
-	rt.AnalyticsRequests.Label = "Total Requests"
-	rt.AnalyticsCallbacks = NewAccumulator(rt.ctx, Samples, Interval)
-	rt.AnalyticsCallbacks.Label = "Callbacks in buffer"
-	rt.AnalyticsAverageResponse = NewAccumulator(rt.ctx, Samples, Interval)
-	rt.AnalyticsAverageResponse.Label = "Average response time"
-	rt.AnalyticsWaiting = NewAccumulator(rt.ctx, Samples, Interval)
-	rt.AnalyticsWaiting.Label = "Waiting Requests"
+	rt.AnalyticsHit = accumulator.NewAccumulator(rt.ctx, Samples, Interval, "Ratelimit Hits")
+	rt.AnalyticsMiss = accumulator.NewAccumulator(rt.ctx, Samples, Interval, "Ratelimit Misses")
+	rt.AnalyticsRequests = accumulator.NewAccumulator(rt.ctx, Samples, Interval, "Total Requests")
+	rt.AnalyticsCallbacks = accumulator.NewAccumulator(rt.ctx, Samples, Interval, "Callbacks in buffer")
+	rt.AnalyticsAverageResponse = accumulator.NewAccumulator(rt.ctx, Samples, Interval, "Average response time")
+	rt.AnalyticsWaiting = accumulator.NewAccumulator(rt.ctx, Samples, Interval, "Waiting Requests")
 
-	go rt.LazyCallbackJob()
+	go rt.TakeOutTheTrash()
 	go func() {
 		e := time.NewTicker(Interval)
 		for {
@@ -314,184 +311,101 @@ func (rt *RestTunnel) LoadConfiguration(path string) (configuration *TunnelConfi
 	return
 }
 
-// HandleQueueJob handles a TunnelRequest gathered from a queue
-func (rt *RestTunnel) HandleQueueJob(tr *TunnelRequest) {
-	// This goroutine shows a job that is taking too long.
-	stage := "init"
-	fin := make(chan bool)
-	go func() {
-		waitTime := time.Second * 5
-		since := time.Now()
-		t := time.NewTimer(waitTime)
-		for {
-			select {
-			case <-fin:
-				return
-			case <-t.C:
-				rt.Logger.Warn().Str("stage", stage).Msgf("Job for %s has been in stage '%s' for too long. Been executing for %f seconds. Possible deadlock?", string(tr.URI), stage, time.Now().Sub(since).Round(time.Second).Seconds())
-				t.Reset(waitTime)
-			}
-		}
-	}()
-	defer func() {
-		close(fin)
-	}()
-
-	stage = "cbki"
-
-	tunnelResponse := &TunnelResponse{
-		expiration: time.Now().UTC().Add(CallbackExpiration),
-		CompleteC:  make(chan bool),
-		Complete:   false,
-		ID:         tr.ID,
-	}
-
-	rt.callbacksMu.Lock()
-	rt.Callbacks[tr.ID] = tunnelResponse
-	rt.callbacksMu.Unlock()
-
-	stage = "aqrq"
-	req := fasthttp.AcquireRequest()
-	tr.Req.Request.CopyTo(req)
-	req.SetBody(tr.Req.Request.Body())
-	req.SetRequestURIBytes(tr.URI)
-	req.URI().SetQueryStringBytes(tr.QueryString)
-
-	// Asks discord to send higher precision reset times
-	req.Header.Set("X-RateLimit-Precision", "millisecond")
-
-	req.Header.VisitAll(func(key []byte, value []byte) {
-		if strings.HasPrefix(strings.ToLower(string(key)), "rt-") {
-			req.Header.DelBytes(key)
-		}
-	})
-
-	var resp *fasthttp.Response
-	var hit bool
-	var err error
-
-	rt.bucketsMu.RLock()
-	bucket := rt.Buckets[tr.Bucket]
-	var globalBucket *Bucket
-	if bucket.global != "" {
-		globalBucket = rt.Buckets[bucket.global]
-	}
-	rt.bucketsMu.RUnlock()
+// TakeOutTheTrash handles cleaning old entries
+func (rt *RestTunnel) TakeOutTheTrash() {
+	t := time.NewTicker(time.Second)
 
 	for {
-		stage = "bckt"
+		select {
+		case <-t.C:
+			callbackCleaned, callbackDuration := rt.CollectCallbacks()
+			queueCleaned, queueDuration := rt.CollectQueues()
 
-		hit = bucket.Lock()
-		if bucket.global != "" {
-			hit = globalBucket.Lock() || hit
-		}
-
-		if hit {
-			rt.AnalyticsHit.Increment()
-		} else {
-			rt.AnalyticsMiss.Increment()
-		}
-
-		stage = "aqrs"
-		resp = fasthttp.AcquireResponse()
-
-		stage = "dorq"
-		err = rt.HTTP.Do(req, resp)
-		rt.AnalyticsRequests.Increment()
-
-		stage = "rtlm"
-		if resp.StatusCode() == 429 {
-			// ratelimit
-			global, err := strconv.ParseBool(string(resp.Header.Peek("X-RateLimit-Global")))
-			if err == nil && global {
-				// Global
-				rt.Logger.Warn().Msg("Hit global ratelimit")
-				if bucket.global != "" {
-					retryAfter, err := strconv.Atoi(string(resp.Header.Peek("Retry-After")))
-					if err != nil {
-						// Convert ms to ns (x1e6)
-						globalBucket.Exhaust(time.Now().UnixNano() + int64(retryAfter*1000000))
-					}
-				} else {
-					rt.Logger.Warn().Str("bucket", bucket.name).Msg("Hit global ratelimit with global bucket set.")
-				}
+			var waitDuration time.Duration
+			if callbackDuration < queueDuration {
+				waitDuration = callbackDuration
 			} else {
-				// We ignore X-RateLimit-Reset as we already have Reset-After
-				rt.Logger.Debug().Msg("Hit endpoint ratelimit")
-				rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
-				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", string(resp.Header.Peek("X-RateLimit-Limit")))
-				}
-				rlResetRaw, err := strconv.ParseFloat(string(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
-				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", string(resp.Header.Peek("X-RateLimit-Reset-After")))
-				}
-				rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
-				// If we have received 429 we already know it is 0
-				// rlRemaining, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Remaining")))
-				// if err != nil {
-				// 	rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
-				// }
-
-				// Convert seconds to nanoseconds (x1e9) (we add on about 500ms just in case)
-				rlReset := time.Now().UnixNano() + int64(rlResetRaw*float64(1000000000)) + 500000000
-				bucket.Exhaust(rlReset)
-				bucket.Modify(int32(rlLimit), atomic.LoadInt64(bucket.duration), rlBucket, bucket.global)
+				waitDuration = queueDuration
 			}
-		} else {
-			rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
-			// If we receive no X-RateLimit-Bucket it is likely not discord and we will just discard anyway
-			if rlBucket != "" {
-				rt.Logger.Debug().Msgf("Received bucket '%s'", rlBucket)
-				if rlBucket != bucket.alias && rlBucket != "" {
-					rt.Logger.Debug().Msgf("Discovered alias bucket '%s' for '%s'", rlBucket, bucket.name)
-					bucket.Modify(
-						atomic.LoadInt32(bucket.limit),
-						atomic.LoadInt64(bucket.duration),
-						rlBucket,
-						bucket.global,
-					)
-				}
 
-				rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
-				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", string(resp.Header.Peek("X-RateLimit-Limit")))
-				}
-				rlRemaining, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Remaining")))
-				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
-				}
-				rlReset, err := strconv.ParseFloat(string(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
-				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", string(resp.Header.Peek("X-RateLimit-Reset-After")))
-				}
-
-				if rlRemaining == rlLimit-1 {
-					// We have just received a new RateLimit so we can now infer the ratelimit
-					bucket.Modify(int32(rlLimit), time.Duration(rlReset*1000000000).Nanoseconds(), rlBucket, bucket.global)
-				}
+			if waitDuration < (time.Second * 5) {
+				waitDuration = time.Second * 5
 			}
-			break
+
+			t.Reset(waitDuration)
+
+			if callbackCleaned+queueCleaned > 0 {
+				rt.Logger.Info().Int("callbacks", callbackCleaned).Int("queues", queueCleaned).Dur("until", waitDuration).Msg("Cleaned stale entries")
+			}
+		case <-rt.ctx.Done():
+			return
 		}
 	}
+}
 
-	close(tunnelResponse.CompleteC)
-	tunnelResponse.expiration = time.Now().UTC().Add(CallbackExpiration)
-	tunnelResponse.Complete = true
-	tunnelResponse.RatelimitHit = hit
-	tunnelResponse.Response = resp
-	tunnelResponse.Error = err
+// CollectQueues handles cleaning old queues
+func (rt *RestTunnel) CollectQueues() (cleaned int, dur time.Duration) {
+	now := time.Now().UTC()
+	interval := QueueExpiration
+	removals := make([]string, 0, len(rt.Queues))
 
-	stage = "clbk"
-	rt.callbacksMu.Lock()
-	rt.Callbacks[tr.ID] = tunnelResponse
-	rt.callbacksMu.Unlock()
-
-	stage = "chan"
-	if tr.ResponseType == RespondWithResponse {
-		tr.Callback <- true
+	rt.queuesMu.RLock()
+	for queueName, queue := range rt.Queues {
+		if queue.Expiration.Before(now) {
+			removals = append(removals, queueName)
+			continue
+		}
+		timeUntil := queue.Expiration.Sub(now)
+		// If this queue will expire in less than the current
+		// interval, set the interval to the new value so we
+		// can wait until the most next expiration or wait a
+		// minute.
+		if timeUntil < interval {
+			interval = timeUntil
+		}
 	}
-	stage = "done"
+	rt.queuesMu.RUnlock()
+	if len(removals) > 0 {
+		rt.queuesMu.Lock()
+		for _, queueName := range removals {
+			delete(rt.Queues, queueName)
+		}
+		rt.queuesMu.Unlock()
+	}
+	return len(removals), interval
+}
+
+// CollectCallbacks handles cleaning old callbacks
+func (rt *RestTunnel) CollectCallbacks() (cleaned int, dur time.Duration) {
+	now := time.Now().UTC()
+	interval := CallbackExpiration
+	removals := make([]uuid.UUID, 0, len(rt.Callbacks))
+
+	rt.callbacksMu.RLock()
+	for callbackID, callback := range rt.Callbacks {
+		if callback.Expiration.Before(now) {
+			removals = append(removals, callbackID)
+			continue
+		}
+		timeUntil := callback.Expiration.Sub(now)
+
+		// If this queue will expire in less than the current
+		// interval, set the interval to the new value so we
+		// can wait until the most next expiration or wait a
+		// minute.
+		if timeUntil < interval {
+			interval = timeUntil
+		}
+	}
+	rt.callbacksMu.RUnlock()
+	if len(removals) > 0 {
+		rt.callbacksMu.Lock()
+		for _, callbackID := range removals {
+			delete(rt.Callbacks, callbackID)
+		}
+		rt.callbacksMu.Unlock()
+	}
+	return len(removals), interval
 }
 
 // StartQueueJob starts a queue job
@@ -524,35 +438,211 @@ func (rt *RestTunnel) StartQueueJob(q *Queue) {
 	}
 }
 
-// CollectQueues handles cleaning old queues
-
-// CollectCallbacks handles cleaning old callbacks
-
-// LazyCallbackJob handles clearing old entries in callback
-func (rt *RestTunnel) LazyCallbackJob() {
-	interval := time.Second * 5
-	t := time.NewTicker(interval)
-	for {
-		<-t.C
-		now := time.Now().UTC()
-		deletions := []uuid.UUID{}
+// HandleQueueJob handles a TunnelRequest gathered from a queue
+func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
+	// This goroutine shows a job that is taking too long.
+	stage := "init"
+	fin := make(chan bool)
+	go func() {
+		waitTime := time.Second * 5
+		since := time.Now()
+		t := time.NewTimer(waitTime)
 		for {
-			id, tunnelResponse := rt.randomCallback()
-			if tunnelResponse != nil {
-				if tunnelResponse.expiration.Sub(now) <= 0 {
-					deletions = append(deletions, id)
-					continue
+			select {
+			case <-fin:
+				return
+			case <-t.C:
+				rt.Logger.Warn().Str("stage", stage).Msgf("Job for %s has been in stage '%s' for too long. Been executing for %f seconds. Possible deadlock?", string(tr.URI), stage, time.Now().Sub(since).Round(time.Second).Seconds())
+				t.Reset(waitTime)
+			}
+		}
+	}()
+	defer func() {
+		close(fin)
+	}()
+
+	stage = "cbki"
+
+	tunnelResponse := &structs.TunnelResponse{
+		Expiration: time.Now().UTC().Add(CallbackExpiration),
+		CompleteC:  make(chan bool),
+		Complete:   false,
+		ID:         tr.ID,
+	}
+
+	rt.callbacksMu.Lock()
+	rt.Callbacks[tr.ID] = tunnelResponse
+	rt.callbacksMu.Unlock()
+
+	stage = "aqrq"
+	req := fasthttp.AcquireRequest()
+	tr.Req.Request.CopyTo(req)
+	req.SetBody(tr.Req.Request.Body())
+	req.SetRequestURIBytes(tr.URI)
+	req.URI().SetQueryStringBytes(tr.QueryString)
+
+	// Asks discord to send higher precision reset times
+	req.Header.Set("X-RateLimit-Precision", "millisecond")
+
+	req.Header.VisitAll(func(key []byte, value []byte) {
+		if strings.HasPrefix(strings.ToLower(string(key)), "rt-") {
+			req.Header.DelBytes(key)
+		}
+	})
+
+	var resp *fasthttp.Response
+	var hit bool
+	var err error
+
+	rt.bucketsMu.RLock()
+	_bucket := rt.Buckets[tr.Bucket]
+	var globalBucket *bucket.Bucket
+	if _bucket.Global != "" {
+		globalBucket = rt.Buckets[_bucket.Global]
+	}
+	rt.bucketsMu.RUnlock()
+
+	for {
+		stage = "bckt"
+
+		hit = _bucket.Lock()
+		if _bucket.Global != "" {
+			hit = globalBucket.Lock() || hit
+		}
+
+		if hit {
+			rt.AnalyticsHit.Increment()
+		} else {
+			rt.AnalyticsMiss.Increment()
+		}
+
+		stage = "aqrs"
+		resp = fasthttp.AcquireResponse()
+
+		stage = "dorq"
+		err = rt.HTTP.Do(req, resp)
+		rt.AnalyticsRequests.Increment()
+
+		stage = "rtlm"
+		if resp.StatusCode() == 429 {
+			// ratelimit
+			global, err := strconv.ParseBool(string(resp.Header.Peek("X-RateLimit-Global")))
+			if err == nil && global {
+				// Global
+				rt.Logger.Warn().Msg("Hit global ratelimit")
+				if _bucket.Global != "" {
+					retryAfter, err := strconv.Atoi(string(resp.Header.Peek("Retry-After")))
+					if err != nil {
+						// Convert ms to ns (x1e6)
+						globalBucket.Exhaust(time.Now().UnixNano() + int64(retryAfter*1000000))
+					}
+				} else {
+					rt.Logger.Warn().Str("bucket", _bucket.Name).Msg("Hit global ratelimit with global bucket set.")
+				}
+			} else {
+				// We ignore X-RateLimit-Reset as we already have Reset-After
+				rt.Logger.Debug().Msg("Hit endpoint ratelimit")
+				rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
+				if err != nil {
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", string(resp.Header.Peek("X-RateLimit-Limit")))
+				}
+				rlResetRaw, err := strconv.ParseFloat(string(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
+				if err != nil {
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", string(resp.Header.Peek("X-RateLimit-Reset-After")))
+				}
+				rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
+				// If we have received 429 we already know it is 0
+				// rlRemaining, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Remaining")))
+				// if err != nil {
+				// 	rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
+				// }
+
+				// Convert seconds to nanoseconds (x1e9) (we add on about 500ms just in case)
+				rlReset := time.Now().UnixNano() + int64(rlResetRaw*float64(1000000000)) + 500000000
+				_bucket.Exhaust(rlReset)
+				_bucket.Modify(int32(rlLimit), atomic.LoadInt64(_bucket.Duration), rlBucket, _bucket.Global)
+			}
+		} else {
+			rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
+			// If we receive no X-RateLimit-Bucket it is likely not discord and we will just discard anyway
+			if rlBucket != "" {
+				rt.Logger.Debug().Msgf("Received bucket '%s'", rlBucket)
+				if rlBucket != _bucket.Alias && rlBucket != "" {
+					rt.Logger.Debug().Msgf("Discovered alias bucket '%s' for '%s'", rlBucket, _bucket.Name)
+					_bucket.Modify(
+						atomic.LoadInt32(_bucket.Limit),
+						atomic.LoadInt64(_bucket.Duration),
+						rlBucket,
+						_bucket.Global,
+					)
+				}
+
+				rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
+				if err != nil {
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", string(resp.Header.Peek("X-RateLimit-Limit")))
+				}
+				rlRemaining, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Remaining")))
+				if err != nil {
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
+				}
+				rlReset, err := strconv.ParseFloat(string(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
+				if err != nil {
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", string(resp.Header.Peek("X-RateLimit-Reset-After")))
+				}
+
+				if rlRemaining == rlLimit-1 {
+					// We have just received a new RateLimit so we can now infer the ratelimit
+					_bucket.Modify(int32(rlLimit), time.Duration(rlReset*1000000000).Nanoseconds(), rlBucket, _bucket.Global)
 				}
 			}
 			break
 		}
-		rt.callbacksMu.Lock()
-		for _, uuid := range deletions {
-			delete(rt.Callbacks, uuid)
-		}
-		rt.callbacksMu.Unlock()
 	}
+
+	close(tunnelResponse.CompleteC)
+	tunnelResponse.Expiration = time.Now().UTC().Add(CallbackExpiration)
+	tunnelResponse.Complete = true
+	tunnelResponse.RatelimitHit = hit
+	tunnelResponse.Response = resp
+	tunnelResponse.Error = err
+
+	stage = "clbk"
+	rt.callbacksMu.Lock()
+	rt.Callbacks[tr.ID] = tunnelResponse
+	rt.callbacksMu.Unlock()
+
+	stage = "chan"
+	if tr.ResponseType == structs.RespondWithResponse {
+		tr.Callback <- true
+	}
+	stage = "done"
 }
+
+// // LazyCallbackJob handles clearing old entries in callback
+// func (rt *RestTunnel) LazyCallbackJob() {
+// 	interval := time.Second * 5
+// 	t := time.NewTicker(interval)
+// 	for {
+// 		<-t.C
+// 		now := time.Now().UTC()
+// 		deletions := []uuid.UUID{}
+// 		for {
+// 			id, tunnelResponse := rt.randomCallback()
+// 			if tunnelResponse != nil {
+// 				if tunnelResponse.Expiration.Sub(now) <= 0 {
+// 					deletions = append(deletions, id)
+// 					continue
+// 				}
+// 			}
+// 			break
+// 		}
+// 		rt.callbacksMu.Lock()
+// 		for _, uuid := range deletions {
+// 			delete(rt.Callbacks, uuid)
+// 		}
+// 		rt.callbacksMu.Unlock()
+// 	}
+// }
 
 // HandleRequest handles a HTTP request given to RestTunnel
 func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
@@ -607,7 +697,7 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	if err != nil {
 		hasPriority = false
 	}
-	responseType, _ := ParseResponse(string(ctx.Request.Header.Peek("RT-ResponseType")))
+	responseType, _ := structs.ParseResponse(string(ctx.Request.Header.Peek("RT-ResponseType")))
 
 	var requestURI []byte
 	if rt.Configuration.ReverseRoute.Enabled {
@@ -664,19 +754,19 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	initialBucketName := string(URI.Host()) + ":" + hex.EncodeToString(pathHash.Sum(nil))
 
 	// We then traverse the bucket in case it does not exist or it has an alias as some paths may use the same bucket
-	bucket, bucketStack, err := rt.TraverseBucket(initialBucketName)
+	_bucket, bucketStack, err := rt.TraverseBucket(initialBucketName)
 
 	if err != nil {
 		rt.Logger.Debug().Err(err).Msgf("Bucket '%s' does not exist yet", initialBucketName)
 	} else {
-		rt.Logger.Debug().Str("bucket", bucket.name).Msgf("Traversed bucket: %v", bucketStack)
+		rt.Logger.Debug().Str("bucket", _bucket.Name).Msgf("Traversed bucket: %v", bucketStack)
 	}
 
 	var bucketName string
 	var queue *Queue
 
 	switch err {
-	case ErrBucketCircularAlias:
+	case bucket.ErrBucketCircularAlias:
 		ctx.SetStatusCode(409)
 		rterr := fmt.Sprintf(err.Error(), initialBucketName, bucketStack)
 		ctx.Response.Header.Set("Rt-Error", rterr)
@@ -690,11 +780,11 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 			ctx.Write(res)
 		}
 		return
-	case ErrBucketDoesNotExist:
+	case bucket.ErrBucketDoesNotExist:
 		// Bucket will be created when request is completed so signify by leaving it blank
 		bucketName = initialBucketName
 	default:
-		bucketName = bucket.name
+		bucketName = _bucket.Name
 	}
 
 	globalBucket := ""
@@ -709,13 +799,13 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	rt.bucketsMu.Lock()
 	if _, ok := rt.Buckets[bucketName]; !ok {
 		rt.Logger.Debug().Msgf("Creating bucket '%s'", bucketName)
-		bucket = CreateBucket(bucketName, 10, time.Second*10, "", globalBucket)
-		rt.Buckets[bucketName] = bucket
+		_bucket = bucket.CreateBucket(bucketName, 10, time.Second*10, "", globalBucket)
+		rt.Buckets[bucketName] = _bucket
 	}
 	if _, ok := rt.Buckets[globalBucket]; !ok {
 		rt.Logger.Debug().Msgf("Creating global bucket '%s'", globalBucket)
-		bucket = CreateBucket(globalBucket, 50, time.Second, "", "")
-		rt.Buckets[globalBucket] = bucket
+		_bucket = bucket.CreateBucket(globalBucket, 50, time.Second, "", "")
+		rt.Buckets[globalBucket] = _bucket
 	}
 	rt.bucketsMu.Unlock()
 
@@ -724,23 +814,23 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	if _, ok := rt.Queues[bucketName]; !ok {
 		rt.Logger.Debug().Msgf("Creating queue '%s'", bucketName)
 		queue = &Queue{
-			expiration:     time.Now().UTC().Add(QueueExpiration),
+			Expiration:     time.Now().UTC().Add(QueueExpiration),
 			JobActive:      abool.NewBool(false),
 			JobsHandled:    new(int64),
-			Bucket:         bucket,
+			Bucket:         _bucket,
 			events:         new(int64),
 			priority:       new(int64),
-			PriorityEvents: make(chan *TunnelRequest, 64),
-			Events:         make(chan *TunnelRequest, 64),
+			PriorityEvents: make(chan *structs.TunnelRequest, 64),
+			Events:         make(chan *structs.TunnelRequest, 64),
 		}
 		rt.Queues[bucketName] = queue
 	} else {
 		queue = rt.Queues[bucketName]
-		queue.expiration = time.Now().UTC().Add(QueueExpiration)
+		queue.Expiration = time.Now().UTC().Add(QueueExpiration)
 	}
 	rt.queuesMu.Unlock()
 
-	tunnelRequest := TunnelRequest{
+	tunnelRequest := structs.TunnelRequest{
 		ID:           id,
 		Req:          ctx,
 		URI:          URI.FullURI(),
@@ -766,7 +856,7 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Add tunnelRequest to job queue
-	if responseType == NoResponse {
+	if responseType == structs.NoResponse {
 		go queueEvent()
 		return
 	}
@@ -780,7 +870,7 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	ctx.Response.Header.Set("RT-Hit", "false")
 
 	switch responseType {
-	case RespondWithResponse:
+	case structs.RespondWithResponse:
 		// Wait for the callback channel to say the request has been completed then
 		// retrieve from callbacks and remove.
 		<-tunnelRequest.Callback
@@ -798,10 +888,6 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 
 			ctx.Response.ResetBody()
 			body := tunnelResponse.Response.Body()
-			// body, err := rt.DecodeBody(tunnelResponse.Response)
-			// if err != nil {
-			// 	println(err.Error())
-			// }
 
 			// Copy TunnelResponse to fasthttp.Response
 			tunnelResponse.Response.Header.VisitAll(func(key []byte, value []byte) {
@@ -812,11 +898,10 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 			ctx.Response.Header.Set("RT-Bucket", tunnelRequest.Bucket)
 			ctx.Response.Header.Set("RT-Buckets", strings.Join(bucketStack, ";"))
 
-			// println(string(body))
 			ctx.Write(body)
 			ctx.SetStatusCode(tunnelResponse.Response.StatusCode())
 		}
-	case RespondWithUUIDCallback:
+	case structs.RespondWithUUIDCallback:
 		ctx.Response.Header.Set("RT-UUID", tunnelRequest.ID.String())
 		ctx.Response.Header.Set("RT-Bucket", tunnelRequest.Bucket)
 		ctx.Response.Header.Set("RT-Buckets", strings.Join(bucketStack, ";"))
@@ -827,7 +912,7 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 
 // TraverseBucket returns the original bucket from the bucket alias.
 // Returns current bucket, slice of buckets traversed through and error.
-func (rt *RestTunnel) TraverseBucket(bucketStr string) (bucket *Bucket, bucketStack []string, err error) {
+func (rt *RestTunnel) TraverseBucket(bucketStr string) (_bucket *bucket.Bucket, bucketStack []string, err error) {
 	rt.bucketsMu.RLock()
 	defer rt.bucketsMu.RUnlock()
 
@@ -835,19 +920,19 @@ func (rt *RestTunnel) TraverseBucket(bucketStr string) (bucket *Bucket, bucketSt
 	for {
 		bucketStack = append(bucketStack, bucketStr)
 		if _, ok := stack[bucketStr]; ok {
-			return nil, bucketStack, ErrBucketCircularAlias
+			return nil, bucketStack, bucket.ErrBucketCircularAlias
 		}
 		stack[bucketStr] = true
 
-		bucket, ok := rt.Buckets[bucketStr]
+		_bucket, ok := rt.Buckets[bucketStr]
 		if !ok {
-			return nil, bucketStack, ErrBucketDoesNotExist
+			return nil, bucketStack, bucket.ErrBucketDoesNotExist
 		}
 
-		if bucket.alias != "" && bucket.alias != bucket.name {
-			bucketStr = bucket.alias
+		if _bucket.Alias != "" && _bucket.Alias != _bucket.Name {
+			bucketStr = _bucket.Alias
 		} else {
-			return bucket, bucketStack, nil
+			return _bucket, bucketStack, nil
 		}
 	}
 }

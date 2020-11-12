@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	structs "github.com/TheRockettek/RestTunnel/structs"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
@@ -66,7 +67,7 @@ func AliveHandler(rt *RestTunnel) http.HandlerFunc {
 func AnalyticsHandler(rt *RestTunnel) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
 		now := time.Now()
-		ar := AnalyticResponse{
+		ar := structs.AnalyticResponse{
 			Success: true,
 			Error:   "",
 			Uptime:  DurationTimestamp(now.Sub(rt.Start)),

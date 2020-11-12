@@ -18,15 +18,15 @@ var ErrBucketCircularAlias = xerrors.New("Bucket '%s' references itself. Stack: 
 type Bucket struct {
 	mu sync.RWMutex
 
-	name  string
-	alias string
+	Name  string
+	Alias string
 
 	// When handling the bucket lock, make sure you check the global bucket if it has
 	// been defined.
-	global string
+	Global string
 
-	limit     *int32
-	duration  *int64
+	Limit     *int32
+	Duration  *int64
 	ResetsAt  *int64
 	Available *int32
 }
@@ -35,11 +35,11 @@ type Bucket struct {
 func CreateBucket(name string, limit int32, duration time.Duration, alias string, global string) (b *Bucket) {
 	nanos := duration.Nanoseconds()
 	return &Bucket{
-		name:     name,
-		alias:    alias,
-		global:   global,
-		limit:    &limit,
-		duration: &nanos,
+		Name:     name,
+		Alias:    alias,
+		Global:   global,
+		Limit:    &limit,
+		Duration: &nanos,
 
 		ResetsAt:  new(int64),
 		Available: new(int32),
@@ -55,8 +55,8 @@ func (b *Bucket) Lock() (hit bool) {
 
 	// If we have passed reset, reset the available hits
 	if atomic.LoadInt64(b.ResetsAt) <= now {
-		atomic.StoreInt64(b.ResetsAt, now+atomic.LoadInt64(b.duration))
-		atomic.StoreInt32(b.Available, atomic.LoadInt32(b.limit))
+		atomic.StoreInt64(b.ResetsAt, now+atomic.LoadInt64(b.Duration))
+		atomic.StoreInt32(b.Available, atomic.LoadInt32(b.Limit))
 	}
 
 	if atomic.LoadInt32(b.Available) <= 0 {
@@ -83,8 +83,8 @@ func (b *Bucket) Exhaust(reset int64) {
 func (b *Bucket) Modify(limit int32, duration int64, alias string, global string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.alias = alias
-	b.global = global
-	atomic.StoreInt32(b.limit, limit)
-	atomic.StoreInt64(b.duration, duration)
+	b.Alias = alias
+	b.Global = global
+	atomic.StoreInt32(b.Limit, limit)
+	atomic.StoreInt64(b.Duration, duration)
 }

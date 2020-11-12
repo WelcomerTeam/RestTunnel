@@ -74,7 +74,7 @@ type TunnelRequest struct {
 
 // TunnelResponse represents a RestTunnel response
 type TunnelResponse struct {
-	expiration time.Time
+	Expiration time.Time
 
 	CompleteC chan bool
 

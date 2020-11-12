@@ -134,9 +134,10 @@ func (ac *Accumulator) Run() {
 }
 
 // NewAccumulator creates an accumulator. This does not automatically call Run
-func NewAccumulator(ctx context.Context, storedSamples int, interval time.Duration) *Accumulator {
+func NewAccumulator(ctx context.Context, storedSamples int, interval time.Duration, label string) *Accumulator {
 	acc := &Accumulator{
 		Samples:       make([]*Sample, 0, storedSamples),
+		Label:         label,
 		acc:           int64(0),
 		ctx:           ctx,
 		storedSamples: storedSamples,
