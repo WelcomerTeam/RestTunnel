@@ -56,7 +56,13 @@ type AliveResponse struct {
 type TunnelRequest struct {
 	ID uuid.UUID
 
-	URI     []byte
+	Req *fasthttp.RequestCtx
+
+	URI         []byte
+	Body        []byte
+	Method      string
+	QueryString []byte
+
 	Headers *fasthttp.RequestHeader
 
 	ResponseType ResponseType
@@ -69,6 +75,8 @@ type TunnelRequest struct {
 // TunnelResponse represents a RestTunnel response
 type TunnelResponse struct {
 	expiration time.Time
+
+	CompleteC chan bool
 
 	Complete     bool
 	ID           uuid.UUID
