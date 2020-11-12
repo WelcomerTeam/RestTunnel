@@ -39,12 +39,6 @@ const VERSION = "1.0"
 // at.
 const ConfigurationPath = "restTunnel.yaml"
 
-// CallbackExpiration is the duration a callback can exist before it is treated as stale and removed
-const CallbackExpiration = time.Minute * 1
-
-// QueueExpiration is the duration a callback can exist before it is treated as stale and removed
-const QueueExpiration = time.Minute * 4
-
 // ErrCallbackNotFinished is raised when attempting to retrieve the callback on a request that is not done
 var ErrCallbackNotFinished = "Callback '%s' has not completed request"
 
@@ -66,6 +60,11 @@ var discordDomains = map[string]bool{
 // TunnelConfiguration represents the configuration for RestTunnel
 type TunnelConfiguration struct {
 	Host string `json:"host" yaml:"host"`
+
+	State struct {
+		CallbackExpiration int `json:"callback_expiration" yaml:"callback_expiration"`
+		QueueExpiration    int `json:"queue_expiration" yaml:"queue_expiration"`
+	} `json:"state" yaml:"state"`
 
 	ReverseRoute struct {
 		Enabled bool   `json:"enabled" yaml:"enabled"`
@@ -346,7 +345,7 @@ func (rt *RestTunnel) TakeOutTheTrash() {
 // CollectQueues handles cleaning old queues
 func (rt *RestTunnel) CollectQueues() (cleaned int, dur time.Duration) {
 	now := time.Now().UTC()
-	interval := QueueExpiration
+	interval := time.Second * time.Duration(rt.Configuration.State.QueueExpiration)
 	removals := make([]string, 0, len(rt.Queues))
 
 	rt.queuesMu.RLock()
@@ -378,7 +377,7 @@ func (rt *RestTunnel) CollectQueues() (cleaned int, dur time.Duration) {
 // CollectCallbacks handles cleaning old callbacks
 func (rt *RestTunnel) CollectCallbacks() (cleaned int, dur time.Duration) {
 	now := time.Now().UTC()
-	interval := CallbackExpiration
+	interval := time.Second * time.Duration(rt.Configuration.State.CallbackExpiration)
 	removals := make([]uuid.UUID, 0, len(rt.Callbacks))
 
 	rt.callbacksMu.RLock()
@@ -464,7 +463,7 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 	stage = "cbki"
 
 	tunnelResponse := &structs.TunnelResponse{
-		Expiration: time.Now().UTC().Add(CallbackExpiration),
+		Expiration: time.Now().UTC().Add(time.Second * time.Duration(rt.Configuration.State.CallbackExpiration)),
 		CompleteC:  make(chan bool),
 		Complete:   false,
 		ID:         tr.ID,
@@ -600,7 +599,7 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 	}
 
 	close(tunnelResponse.CompleteC)
-	tunnelResponse.Expiration = time.Now().UTC().Add(CallbackExpiration)
+	tunnelResponse.Expiration = time.Now().UTC().Add(time.Second * time.Duration(rt.Configuration.State.CallbackExpiration))
 	tunnelResponse.Complete = true
 	tunnelResponse.RatelimitHit = hit
 	tunnelResponse.Response = resp
@@ -617,32 +616,6 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 	}
 	stage = "done"
 }
-
-// // LazyCallbackJob handles clearing old entries in callback
-// func (rt *RestTunnel) LazyCallbackJob() {
-// 	interval := time.Second * 5
-// 	t := time.NewTicker(interval)
-// 	for {
-// 		<-t.C
-// 		now := time.Now().UTC()
-// 		deletions := []uuid.UUID{}
-// 		for {
-// 			id, tunnelResponse := rt.randomCallback()
-// 			if tunnelResponse != nil {
-// 				if tunnelResponse.Expiration.Sub(now) <= 0 {
-// 					deletions = append(deletions, id)
-// 					continue
-// 				}
-// 			}
-// 			break
-// 		}
-// 		rt.callbacksMu.Lock()
-// 		for _, uuid := range deletions {
-// 			delete(rt.Callbacks, uuid)
-// 		}
-// 		rt.callbacksMu.Unlock()
-// 	}
-// }
 
 // HandleRequest handles a HTTP request given to RestTunnel
 func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
@@ -814,7 +787,7 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	if _, ok := rt.Queues[bucketName]; !ok {
 		rt.Logger.Debug().Msgf("Creating queue '%s'", bucketName)
 		queue = &Queue{
-			Expiration:     time.Now().UTC().Add(QueueExpiration),
+			Expiration:     time.Now().UTC().Add(time.Second * time.Duration(rt.Configuration.State.QueueExpiration)),
 			JobActive:      abool.NewBool(false),
 			JobsHandled:    new(int64),
 			Bucket:         _bucket,
@@ -826,7 +799,7 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 		rt.Queues[bucketName] = queue
 	} else {
 		queue = rt.Queues[bucketName]
-		queue.Expiration = time.Now().UTC().Add(QueueExpiration)
+		queue.Expiration = time.Now().UTC().Add(time.Second * time.Duration(rt.Configuration.State.QueueExpiration))
 	}
 	rt.queuesMu.Unlock()
 

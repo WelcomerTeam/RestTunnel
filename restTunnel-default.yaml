@@ -1,4 +1,7 @@
 host: 127.0.0.1:8000
+state:
+  callback_expiration: 60
+  queue_expiration: 240
 reverse_route:
   enabled: true
   host: https://discord.com
