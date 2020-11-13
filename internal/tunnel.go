@@ -674,15 +674,17 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 
 	path = string(ctx.Request.URI().Path())
 
-	fasthttpadaptor.NewFastHTTPHandler(rt.Router)(ctx)
-	if ctx.Response.StatusCode() != 404 {
-		ctx.SetContentType("application/json;charset=utf8")
-	}
-	// If there is no matching router route, we will create a tunnel request
-	if ctx.Response.StatusCode() == 404 {
-		ctx.Response.Reset()
-		rt.TunnelHTTPRequest(ctx)
-	}
+	fasthttp.CompressHandlerBrotliLevel(func(ctx *fasthttp.RequestCtx) {
+		fasthttpadaptor.NewFastHTTPHandler(rt.Router)(ctx)
+		if ctx.Response.StatusCode() != 404 {
+			ctx.SetContentType("application/json;charset=utf8")
+		}
+		// If there is no matching router route, we will create a tunnel request
+		if ctx.Response.StatusCode() == 404 {
+			ctx.Response.Reset()
+			rt.TunnelHTTPRequest(ctx)
+		}
+	}, fasthttp.CompressBrotliDefaultCompression, fasthttp.CompressDefaultCompression)(ctx)
 
 	return
 }

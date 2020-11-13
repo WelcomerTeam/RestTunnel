@@ -59,7 +59,7 @@ func passResponse(rw http.ResponseWriter, data interface{}, queued *bool, succes
 // AliveHandler returns the RestTunnel version as a way of signifying it is ready to serve
 func AliveHandler(rt *RestTunnel) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		passResponse(rw, fmt.Sprintf("RestTunnel %s", VERSION), nil, false, http.StatusOK)
+		passResponse(rw, fmt.Sprintf("RestTunnel %s", VERSION), nil, true, http.StatusOK)
 	}
 }
 
