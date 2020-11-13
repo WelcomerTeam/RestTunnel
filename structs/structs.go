@@ -50,6 +50,7 @@ func ParseResponse(responseStr string) (ResponseType, error) {
 type AliveResponse struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	Reverse bool   `json:"reverse"`
 }
 
 // TunnelRequest represents a RestTunnel request
