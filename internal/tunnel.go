@@ -34,7 +34,7 @@ import (
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // VERSION respects semantic versioning
-const VERSION = "1.0"
+const VERSION = "1.1"
 
 // ConfigurationPath is the path to the file the configration will be located
 // at.
@@ -667,9 +667,9 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 				ctx.Request.Header.Method(),
 				ctx.Request.Header.Peek("RT-URL"),
 				ms)
-			atomic.AddInt64(rt.analyticsResponseTotal, ms)
-			atomic.AddInt64(rt.analyticsRequests, 1)
 		}
+		atomic.AddInt64(rt.analyticsResponseTotal, ms)
+		atomic.AddInt64(rt.analyticsRequests, 1)
 	}()
 
 	path = string(ctx.Request.URI().Path())

@@ -72,9 +72,7 @@ func AnalyticsHandler(rt *RestTunnel) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		ar := structs.AnalyticResponse{
-			Success: true,
-			Error:   "",
-			Uptime:  DurationTimestamp(now.Sub(rt.Start)),
+			Uptime: DurationTimestamp(now.Sub(rt.Start)),
 		}
 
 		background, border := "rgba(149, 165, 165, 0.5)", "#7E8C8D"

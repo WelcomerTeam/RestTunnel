@@ -116,10 +116,8 @@ type Dataset struct {
 
 // AnalyticResponse returns the response to an api/analytics request
 type AnalyticResponse struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-	Uptime  string `json:"uptime"`
-	Charts  struct {
+	Uptime string `json:"uptime"`
+	Charts struct {
 		Hits            LineChart `json:"hits"`
 		Misses          LineChart `json:"misses"`
 		Waiting         LineChart `json:"waiting"`
