@@ -83,10 +83,10 @@ func AnalyticsHandler(rt *RestTunnel) http.HandlerFunc {
 		ar.Charts.Callbacks = createLineChart(rt.AnalyticsCallbacks, background, border)
 		ar.Charts.AverageResponse = createLineChart(rt.AnalyticsAverageResponse, background, border)
 
-		ar.Numbers.Hits = rt.AnalyticsHit.GetAllSamples().Sum()
-		ar.Numbers.Misses = rt.AnalyticsMiss.GetAllSamples().Sum()
-		ar.Numbers.Waiting = rt.AnalyticsWaiting.GetAllSamples().Sum()
-		ar.Numbers.Requests = rt.AnalyticsRequests.GetAllSamples().Sum()
+		ar.Numbers.Hits = rt.AnalyticsHit.Sum()
+		ar.Numbers.Misses = rt.AnalyticsMiss.Sum()
+		ar.Numbers.Waiting = rt.AnalyticsWaiting.Sum()
+		ar.Numbers.Requests = rt.AnalyticsRequests.Sum()
 
 		passResponse(rw, ar, nil, true, http.StatusOK)
 	}

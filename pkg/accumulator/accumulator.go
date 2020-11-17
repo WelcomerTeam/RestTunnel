@@ -15,6 +15,8 @@ type Accumulator struct {
 	Samples []*Sample
 	acc     int64
 
+	total int64 // total number of increments ever
+
 	// Samples to store before being discarded
 	storedSamples int
 
@@ -30,6 +32,13 @@ type Sample struct {
 	StoredAt time.Time `json:"stored_at"`
 }
 
+// Sum returns the total number of increments the Accumulator has ever seen
+func (ac *Accumulator) Sum() int64 {
+	ac.RLock()
+	defer ac.RUnlock()
+	return ac.total
+}
+
 // Increment increments the accumulator by 1
 func (ac *Accumulator) Increment() {
 	ac.IncrementBy(1)
@@ -40,6 +49,7 @@ func (ac *Accumulator) IncrementBy(acc int64) {
 	ac.Lock()
 	defer ac.Unlock()
 	ac.acc += acc
+	ac.total += acc
 }
 
 // GetAllSamples returns all samples from the accumulator
