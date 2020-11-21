@@ -9,13 +9,13 @@ import (
 	accumulator "github.com/TheRockettek/RestTunnel/pkg/accumulator"
 	structs "github.com/TheRockettek/RestTunnel/structs"
 	"github.com/google/uuid"
+	"github.com/savsgio/gotils"
 	"github.com/valyala/fasthttp"
 )
 
 // IsDiscordAPIURI returns a boolean if the current URI is a discord API endpoint
 func IsDiscordAPIURI(URI *fasthttp.URI) bool {
-	_, ok := discordDomains[string(URI.Host())]
-	return ok && string(URI.Path()[:4]) == "/api"
+	return gotils.StringSliceInclude(discordDomains, gotils.B2S(URI.Path()[:4]))
 }
 
 // DurationTimestamp outputs in a format similar to the timestamp String()
@@ -50,7 +50,10 @@ func DurationTimestamp(d time.Duration) (output string) {
 func createLineChart(ac *accumulator.Accumulator, background string, border string) (chart structs.LineChart) {
 	data := make([]interface{}, 0, len(ac.Samples))
 	for _, sample := range ac.Samples {
-		data = append(data, structs.DataStamp{sample.StoredAt, sample.Value})
+		data = append(data, structs.DataStamp{
+			Time:  sample.StoredAt,
+			Value: sample.Value,
+		})
 	}
 	chart = structs.LineChart{
 		Datasets: []structs.Dataset{{

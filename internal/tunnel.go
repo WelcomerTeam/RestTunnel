@@ -23,6 +23,7 @@ import (
 	jsoniter "github.com/json-iterator/go"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/savsgio/gotils"
 	"github.com/tevino/abool"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttpadaptor"
@@ -56,9 +57,9 @@ const Samples = 720
 const MaxRedirects = 5
 
 // Known domains to lookup
-var discordDomains = map[string]bool{
-	"discord.com":    true,
-	"discordapp.com": true,
+var discordDomains = []string{
+	"discord.com",
+	"discordapp.com",
 }
 
 // TunnelConfiguration represents the configuration for RestTunnel
@@ -488,7 +489,7 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 	req.Header.Set("X-RateLimit-Precision", "millisecond")
 
 	req.Header.VisitAll(func(key []byte, value []byte) {
-		if strings.HasPrefix(strings.ToLower(string(key)), "rt-") {
+		if strings.HasPrefix(strings.ToLower(gotils.B2S(key)), "rt-") {
 			req.Header.DelBytes(key)
 		}
 	})
@@ -534,7 +535,7 @@ main:
 		case status >= 300 && status < 400:
 			location := resp.Header.Peek("Location")
 			if len(location) > 0 {
-				rt.Logger.Info().Str("location", string(location)).Msgf("Received %d status code and received location", status)
+				rt.Logger.Info().Str("location", gotils.B2S(location)).Msgf("Received %d status code and received location", status)
 				req.SetRequestURIBytes(location)
 			} else {
 				requestDone = true
@@ -543,12 +544,12 @@ main:
 		case status == http.StatusTooManyRequests:
 			requestDone = true
 			// ratelimit
-			global, err := strconv.ParseBool(string(resp.Header.Peek("X-RateLimit-Global")))
+			global, err := strconv.ParseBool(gotils.B2S(resp.Header.Peek("X-RateLimit-Global")))
 			if err == nil && global {
 				// Global
 				rt.Logger.Warn().Msg("Hit global ratelimit")
 				if _bucket.Global != "" {
-					retryAfter, err := strconv.Atoi(string(resp.Header.Peek("Retry-After")))
+					retryAfter, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("Retry-After")))
 					if err != nil {
 						// Convert ms to ns (x1e6)
 						globalBucket.Exhaust(time.Now().UnixNano() + int64(retryAfter*1000000))
@@ -559,19 +560,19 @@ main:
 			} else {
 				// We ignore X-RateLimit-Reset as we already have Reset-After
 				rt.Logger.Debug().Msg("Hit endpoint ratelimit")
-				rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
+				rlLimit, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")))
 				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", string(resp.Header.Peek("X-RateLimit-Limit")))
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")))
 				}
-				rlResetRaw, err := strconv.ParseFloat(string(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
+				rlResetRaw, err := strconv.ParseFloat(gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
 				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", string(resp.Header.Peek("X-RateLimit-Reset-After")))
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After")))
 				}
-				rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
+				rlBucket := gotils.B2S(resp.Header.Peek("X-RateLimit-Bucket"))
 				// If we have received 429 we already know it is 0
-				// rlRemaining, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Remaining")))
+				// rlRemaining, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")))
 				// if err != nil {
-				// 	rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
+				// 	rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")))
 				// }
 
 				// Convert seconds to nanoseconds (x1e9) (we add on about 500ms just in case)
@@ -582,7 +583,7 @@ main:
 			break main
 		default:
 			requestDone = true
-			rlBucket := string(resp.Header.Peek("X-RateLimit-Bucket"))
+			rlBucket := gotils.B2S(resp.Header.Peek("X-RateLimit-Bucket"))
 			// If we receive no X-RateLimit-Bucket it is likely not discord and we will just discard anyway
 			if rlBucket != "" {
 				rt.Logger.Debug().Msgf("Received bucket '%s'", rlBucket)
@@ -596,17 +597,17 @@ main:
 					)
 				}
 
-				rlLimit, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Limit")))
+				rlLimit, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")))
 				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", string(resp.Header.Peek("X-RateLimit-Limit")))
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Limit '%s' to int", gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")))
 				}
-				rlRemaining, err := strconv.Atoi(string(resp.Header.Peek("X-RateLimit-Remaining")))
+				rlRemaining, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")))
 				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", string(resp.Header.Peek("X-RateLimit-Remaining")))
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int", gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")))
 				}
-				rlReset, err := strconv.ParseFloat(string(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
+				rlReset, err := strconv.ParseFloat(gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
 				if err != nil {
-					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", string(resp.Header.Peek("X-RateLimit-Reset-After")))
+					rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float", gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After")))
 				}
 
 				if rlRemaining == rlLimit-1 {
@@ -620,7 +621,7 @@ main:
 
 	if !requestDone {
 		// TODO: Do something if there are too many redirects
-		rt.Logger.Warn().Str("URL", string(tr.URI)).Msg("Too many redirects")
+		rt.Logger.Warn().Str("URL", gotils.B2S(tr.URI)).Msg("Too many redirects")
 	}
 
 	close(tunnelResponse.CompleteC)
@@ -672,7 +673,7 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 		atomic.AddInt64(rt.analyticsRequests, 1)
 	}()
 
-	path = string(ctx.Request.URI().Path())
+	path = gotils.B2S(ctx.Request.URI().Path())
 
 	fasthttp.CompressHandlerBrotliLevel(func(ctx *fasthttp.RequestCtx) {
 		fasthttpadaptor.NewFastHTTPHandler(rt.Router)(ctx)
@@ -693,11 +694,11 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	id := uuid.New()
 
-	hasPriority, err := strconv.ParseBool(string(ctx.Request.Header.Peek("RT-Priority")))
+	hasPriority, err := strconv.ParseBool(gotils.B2S(ctx.Request.Header.Peek("RT-Priority")))
 	if err != nil {
 		hasPriority = false
 	}
-	responseType, _ := structs.ParseResponse(string(ctx.Request.Header.Peek("RT-ResponseType")))
+	responseType, _ := structs.ParseResponse(gotils.B2S(ctx.Request.Header.Peek("RT-ResponseType")))
 
 	var requestURI []byte
 	if rt.Configuration.ReverseRoute.Enabled {
@@ -745,13 +746,13 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 	ctx.Request.Header.CopyTo(&requestHeaders)
 
 	requestHeaders.Set("Accept-Encoding", "gzip, deflate, br")
-	requestHeaders.Set("User-Agent", fmt.Sprintf("restTunnel/%s; %s", VERSION, string(requestHeaders.Peek("User-Agent"))))
+	requestHeaders.Set("User-Agent", fmt.Sprintf("restTunnel/%s; %s", VERSION, gotils.B2S(requestHeaders.Peek("User-Agent"))))
 
 	// Create a bucket with <HOST>:<PATH + AUTHORIZATION with SHA256>
 	pathHash := sha256.New()
 	pathHash.Write(URI.Path()[:])
 	pathHash.Write(requestHeaders.Peek("Authorization"))
-	initialBucketName := string(URI.Host()) + ":" + hex.EncodeToString(pathHash.Sum(nil))
+	initialBucketName := gotils.B2S(URI.Host()) + ":" + hex.EncodeToString(pathHash.Sum(nil))
 
 	// We then traverse the bucket in case it does not exist or it has an alias as some paths may use the same bucket
 	_bucket, bucketStack, err := rt.TraverseBucket(initialBucketName)
@@ -940,7 +941,7 @@ func (rt *RestTunnel) TraverseBucket(bucketStr string) (_bucket *bucket.Bucket, 
 // DecodeBody returns a decoded fasthttp.Response body using the
 // Content-Encoding header
 func (rt *RestTunnel) DecodeBody(resp *fasthttp.Response) (body []byte, err error) {
-	contentEncoding := string(resp.Header.Peek("Content-Encoding"))
+	contentEncoding := gotils.B2S(resp.Header.Peek("Content-Encoding"))
 	body = resp.Body()
 
 	if contentEncoding == "" {

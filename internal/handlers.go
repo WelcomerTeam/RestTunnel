@@ -9,6 +9,7 @@ import (
 	structs "github.com/TheRockettek/RestTunnel/structs"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/savsgio/gotils"
 )
 
 // BaseResponse is the structure of all REST requests
@@ -43,7 +44,7 @@ func passResponse(rw http.ResponseWriter, data interface{}, queued *bool, succes
 			Success: false,
 			Error:   err.Error(),
 		})
-		http.Error(rw, string(resp), http.StatusInternalServerError)
+		http.Error(rw, gotils.B2S(resp), http.StatusInternalServerError)
 		return
 	}
 
@@ -51,7 +52,7 @@ func passResponse(rw http.ResponseWriter, data interface{}, queued *bool, succes
 		rw.WriteHeader(status)
 		rw.Write(resp)
 	} else {
-		http.Error(rw, string(resp), status)
+		http.Error(rw, gotils.B2S(resp), status)
 	}
 	return
 }
@@ -145,7 +146,7 @@ func CallbacksHandler(rt *RestTunnel) http.HandlerFunc {
 		rw.Header().Set("RT-UUID", callback.ID.String())
 
 		callback.Response.Header.VisitAll(func(key []byte, value []byte) {
-			rw.Header().Set(string(key), string(value))
+			rw.Header().Set(gotils.B2S(key), gotils.B2S(value))
 		})
 
 		body, _ := rt.DecodeBody(callback.Response)
