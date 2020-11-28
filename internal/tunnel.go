@@ -36,7 +36,7 @@ import (
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // VERSION respects semantic versioning.
-const VERSION = "1.1"
+const VERSION = "1.1.1"
 
 // ConfigurationPath is the path to the file the configration will be located
 // at.
