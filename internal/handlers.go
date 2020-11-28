@@ -12,7 +12,9 @@ import (
 	"github.com/savsgio/gotils"
 )
 
-// BaseResponse is the structure of all REST requests
+const callbackTimeout = time.Second * 2
+
+// BaseResponse is the structure of all REST requests.
 type BaseResponse struct {
 	Error   string      `json:"error,omitempty"`
 	Success bool        `json:"success"`
@@ -21,8 +23,10 @@ type BaseResponse struct {
 	UUID    *uuid.UUID  `json:"uuid,omitempty"`
 }
 
-func passResponse(rw http.ResponseWriter, data interface{}, queued *bool, success bool, status int) {
+func passResponse(rw http.ResponseWriter, data interface{},
+	queued *bool, success bool, status int) {
 	var resp []byte
+
 	var err error
 	if success {
 		// If there is no error, we will instead use data as the queued boolean value as we should
@@ -45,19 +49,23 @@ func passResponse(rw http.ResponseWriter, data interface{}, queued *bool, succes
 			Error:   err.Error(),
 		})
 		http.Error(rw, gotils.B2S(resp), http.StatusInternalServerError)
+
 		return
 	}
 
 	if success {
 		rw.WriteHeader(status)
-		rw.Write(resp)
+		_, err = rw.Write(resp)
+
+		if err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+		}
 	} else {
 		http.Error(rw, gotils.B2S(resp), status)
 	}
-	return
 }
 
-// AliveHandler returns the RestTunnel version as a way of signifying it is ready to serve
+// AliveHandler returns the RestTunnel version as a way of signifying it is ready to serve.
 func AliveHandler(rt *RestTunnel) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
 		passResponse(rw, structs.AliveResponse{
@@ -68,7 +76,7 @@ func AliveHandler(rt *RestTunnel) http.HandlerFunc {
 	}
 }
 
-// AnalyticsHandler handles returning the RestTunnel analytics
+// AnalyticsHandler handles returning the RestTunnel analytics.
 func AnalyticsHandler(rt *RestTunnel) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
 		now := time.Now()
@@ -93,7 +101,7 @@ func AnalyticsHandler(rt *RestTunnel) http.HandlerFunc {
 	}
 }
 
-// CallbacksHandler handles returning a callback to a client
+// CallbacksHandler handles returning a callback to a client.
 func CallbacksHandler(rt *RestTunnel) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
@@ -101,12 +109,14 @@ func CallbacksHandler(rt *RestTunnel) http.HandlerFunc {
 		_id, ok := vars["id"]
 		if !ok {
 			passResponse(rw, "No UUID passed", nil, false, http.StatusBadRequest)
+
 			return
 		}
 
 		id, err := uuid.Parse(_id)
 		if err != nil {
 			passResponse(rw, "Invalid UUID passed", nil, false, http.StatusBadRequest)
+
 			return
 		}
 
@@ -116,6 +126,7 @@ func CallbacksHandler(rt *RestTunnel) http.HandlerFunc {
 
 		if !ok {
 			passResponse(rw, fmt.Sprintf(ErrCallbackDoesNotExist, id), nil, false, http.StatusGone)
+
 			return
 		}
 
@@ -123,12 +134,12 @@ func CallbacksHandler(rt *RestTunnel) http.HandlerFunc {
 			select {
 			case <-callback.CompleteC:
 				break
-			case <-time.Tick(time.Second * 2):
+			case <-time.Tick(callbackTimeout):
 				// If the callback does not finish in 2 seconds,
 				// request the client to retry in 3 seconds.
-
 				rw.Header().Set("Retry-After", "3")
-				http.Redirect(rw, r, r.URL.String(), 301)
+				http.Redirect(rw, r, r.URL.String(), http.StatusTemporaryRedirect)
+
 				return
 			}
 
@@ -138,6 +149,7 @@ func CallbacksHandler(rt *RestTunnel) http.HandlerFunc {
 
 			if !ok {
 				passResponse(rw, fmt.Sprintf(ErrCallbackDoesNotExist, id), nil, false, http.StatusGone)
+
 				return
 			}
 		}
@@ -150,10 +162,15 @@ func CallbacksHandler(rt *RestTunnel) http.HandlerFunc {
 		})
 
 		body, _ := rt.DecodeBody(callback.Response)
+
 		rw.Header().Set("Content-Encoding", "")
 
-		rw.Write(body)
+		_, err = rw.Write(body)
+
+		if err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+		}
+
 		rw.WriteHeader(callback.Response.StatusCode())
-		return
 	}
 }
