@@ -134,7 +134,7 @@ func CallbacksHandler(rt *RestTunnel) http.HandlerFunc {
 			select {
 			case <-callback.CompleteC:
 				break
-			case <-time.Tick(callbackTimeout):
+			case <-time.NewTicker(callbackTimeout).C:
 				// If the callback does not finish in 2 seconds,
 				// request the client to retry in 3 seconds.
 				rw.Header().Set("Retry-After", "3")
