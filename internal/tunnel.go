@@ -569,13 +569,21 @@ main:
 		resp = fasthttp.AcquireResponse()
 
 		stage = "dorq"
+
 		err = rt.HTTP.Do(req, resp)
+		now := time.Now().UTC()
 		rt.AnalyticsRequests.Increment()
 
 		stage = "rtlm"
 		status := resp.StatusCode()
-		switch {
-		case status >= 300 && status < 400:
+
+		var _alias *bucket.Bucket
+		var ok bool
+
+		switch status {
+		case http.StatusPermanentRedirect:
+		case http.StatusTemporaryRedirect:
+			// We are likely being sent a redirect, go to it and if no location is provided then just continue
 			location := resp.Header.Peek("Location")
 			if len(location) > 0 {
 				rt.Logger.Info().Str("location", gotils.B2S(location)).Msgf("Received %d status code and received location", status)
@@ -585,98 +593,168 @@ main:
 
 				break main
 			}
-		case status == http.StatusTooManyRequests:
-			requestDone = true
-			// ratelimit
-			global, err := strconv.ParseBool(gotils.B2S(resp.Header.Peek("X-RateLimit-Global")))
-			if err == nil && global {
-				// Global
-				rt.Logger.Warn().Msg("Hit global ratelimit")
-				if _bucket.Global != "" {
-					retryAfter, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("Retry-After")))
-					if err != nil {
-						// Convert ms to ns (x1e6)
-						globalBucket.Exhaust(time.Now().UnixNano() + int64(retryAfter*1000000))
-					}
-				} else {
-					rt.Logger.Warn().Str("bucket", _bucket.Name).Msg("Hit global ratelimit with global bucket set.")
-				}
-			} else {
-				// We ignore X-RateLimit-Reset as we already have Reset-After
-				rt.Logger.Debug().Msg("Hit endpoint ratelimit")
-
-				rlLimit, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")))
-				if err != nil {
-					rt.Logger.Warn().
-						Msgf("Failed to convert X-RateLimit-Limit '%s' to int",
-							gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")))
-				}
-
-				rlResetRaw, err := strconv.ParseFloat(gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
-				if err != nil {
-					rt.Logger.Warn().
-						Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float",
-							gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After")))
-				}
-
-				rlBucket := gotils.B2S(resp.Header.Peek("X-RateLimit-Bucket"))
-				// If we have received 429 we already know it is 0
-				// rlRemaining, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")))
-				// if err != nil {
-				// 	rt.Logger.Warn().Msgf("Failed to convert X-RateLimit-Remaining '%s' to int",
-				//  	gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")))
-				// }
-
-				// Convert seconds to nanoseconds (x1e9) (we add on about 500ms just in case)
-				rlReset := time.Now().UnixNano() + int64(rlResetRaw*float64(1000000000)) + 500000000
-				_bucket.Exhaust(rlReset)
-				_bucket.Modify(int32(rlLimit), atomic.LoadInt64(_bucket.Duration), rlBucket, _bucket.Global)
-			}
-
-			break main
-		default:
-			requestDone = true
+		case http.StatusTooManyRequests:
 			rlBucket := gotils.B2S(resp.Header.Peek("X-RateLimit-Bucket"))
-			// If we receive no X-RateLimit-Bucket it is likely not discord and we will just discard anyway
+
+			rt.Logger.Warn().Msg("Encountered 429!!!")
+
+			var _alias *bucket.Bucket
+
+			// set alias to X-RateLimit-Bucket if alias does not equal the bucket and alias is empty
 			if rlBucket != "" {
-				rt.Logger.Debug().Msgf("Received bucket '%s'", rlBucket)
-				if rlBucket != _bucket.Alias && rlBucket != "" {
-					rt.Logger.Debug().Msgf("Discovered alias bucket '%s' for '%s'", rlBucket, _bucket.Name)
-					_bucket.Modify(
-						atomic.LoadInt32(_bucket.Limit),
-						atomic.LoadInt64(_bucket.Duration),
+				if _bucket.Name != rlBucket && _bucket.Alias != rlBucket {
+					_bucket.Mu.Lock()
+					_bucket.Alias = rlBucket
+					_bucket.Mu.Unlock()
+				}
+
+				rt.bucketsMu.RLock()
+				_alias, ok = rt.Buckets[rlBucket]
+				rt.bucketsMu.RUnlock()
+
+				// create bucket if it does not exist
+				if !ok {
+					_alias = bucket.CreateBucket(
 						rlBucket,
+						atomic.LoadInt32(_bucket.Limit),
+						time.Duration(atomic.LoadInt64(_bucket.Duration)),
+						"",
 						_bucket.Global,
 					)
+
+					rt.bucketsMu.Lock()
+					rt.Buckets[rlBucket] = _alias
+					rt.bucketsMu.Unlock()
+				}
+			}
+
+			payload := structs.TooManyRequests{}
+			err = json.Unmarshal(resp.Body(), &payload)
+
+			if err != nil {
+				rt.Logger.Error().Err(err).Msg("Failed to parse TooManyRequests payload")
+
+				time.Sleep(time.Second)
+
+				continue
+			}
+
+			var reset time.Time
+
+			_reset, err := strconv.ParseInt(gotils.B2S(resp.Header.Peek("X-RateLimit-Reset")), 10, 64)
+			if err != nil {
+				resetAfter := gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After"))
+				if resetAfter == "" {
+					continue
 				}
 
-				rlLimit, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")))
+				_reset, err := strconv.ParseFloat(resetAfter, 64)
 				if err != nil {
-					rt.Logger.Warn().
-						Msgf("Failed to convert X-RateLimit-Limit '%s' to int",
-							gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")))
+					rt.Logger.Warn().Err(err).Msg("Failed to parse X-RateLimit-Reset-After header value")
+
+					continue
+				} else {
+					// Convert seconds until reset to a timestamp of when it will reset
+					reset = now.Add(time.Duration(_reset*1000) * time.Millisecond)
+				}
+			} else {
+				// Convert X-RateLimit-Reset to timestamp by converting to milliseconds
+				reset = time.Unix(0, (_reset*1000)*int64(time.Millisecond))
+			}
+
+			println(payload.RetryAfter, gotils.B2S(resp.Header.Peek("X-RateLimit-Reset")), gotils.B2S(resp.Header.Peek("X-RateLimit-Reset")))
+
+			if payload.RetryAfter >= 10000 {
+				// We've fucked up.
+				reset = now.Add(time.Duration(payload.RetryAfter) * time.Millisecond)
+			}
+
+			resetNano := reset.Add(time.Millisecond * 500).UnixNano()
+
+			println("I should be waiting", time.Unix(0, resetNano).Sub(time.Now()).String())
+
+			if payload.Global {
+				if _bucket.Global != "" {
+					rt.Logger.Warn().Str("bucket", _bucket.Name).Msg("Hit global ratelimit bucket")
+					globalBucket.Exhaust(resetNano)
+				} else {
+					rt.Logger.Warn().Str("bucket", _bucket.Name).Msg("Hit global ratelimit whilst no global bucket was set")
+				}
+			}
+
+			// rlRemaining, err := strconv.ParseInt(gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")), 10, 32)
+			// if err != nil {
+			// 	rt.Logger.Warn().Str("bucket", _bucket.Name).Msg("Failed to parse X-RateLimit-Remaining header")
+			// }
+
+			rlLimit, err := strconv.ParseInt(gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")), 10, 32)
+			if err != nil {
+				rt.Logger.Warn().Str("bucket", _bucket.Name).Msg("Failed to parse X-RateLimit-Limit header")
+			}
+
+			_bucket.Mu.Lock()
+			atomic.StoreInt64(_bucket.ResetsAt, resetNano)
+			atomic.StoreInt32(_bucket.Available, 0)
+			atomic.StoreInt32(_bucket.Limit, int32(rlLimit))
+			_bucket.Mu.Unlock()
+
+			if _alias != nil {
+				_alias.Mu.Lock()
+				atomic.StoreInt64(_alias.ResetsAt, resetNano)
+				atomic.StoreInt32(_alias.Available, 0)
+				atomic.StoreInt32(_alias.Limit, int32(rlLimit))
+				_alias.Mu.Unlock()
+			}
+		default:
+			requestDone = true
+
+			var reset time.Time
+
+			_reset, err := strconv.ParseInt(gotils.B2S(resp.Header.Peek("X-RateLimit-Reset")), 10, 64)
+			if err != nil {
+				resetAfter := gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After"))
+				if resetAfter == "" {
+					continue
 				}
 
-				rlRemaining, err := strconv.Atoi(gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")))
+				_reset, err := strconv.ParseFloat(resetAfter, 64)
 				if err != nil {
-					rt.Logger.Warn().
-						Msgf("Failed to convert X-RateLimit-Remaining '%s' to int",
-							gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")))
-				}
+					rt.Logger.Warn().Err(err).Msg("Failed to parse X-RateLimit-Reset-After header value")
 
-				rlReset, err := strconv.ParseFloat(gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After")), 64)
-				if err != nil {
-					rt.Logger.Warn().
-						Msgf("Failed to convert X-RateLimit-Reset-After '%s' to float",
-							gotils.B2S(resp.Header.Peek("X-RateLimit-Reset-After")))
+					continue
+				} else {
+					// Convert seconds until reset to a timestamp of when it will reset
+					reset = now.Add(time.Duration(_reset*1000) * time.Millisecond)
 				}
+			} else {
+				// Convert X-RateLimit-Reset to timestamp by converting to milliseconds
+				reset = time.Unix(0, (_reset*1000)*int64(time.Millisecond))
+			}
 
-				if rlRemaining == rlLimit-1 {
-					// We have just received a new RateLimit so we can now infer the ratelimit
-					_bucket.Modify(int32(rlLimit),
-						time.Duration(rlReset*1000000000).Nanoseconds(),
-						rlBucket, _bucket.Global)
-				}
+			resetNano := reset.Add(500 * time.Millisecond).UnixNano()
+
+			rlRemaining, err := strconv.ParseInt(gotils.B2S(resp.Header.Peek("X-RateLimit-Remaining")), 10, 32)
+			if err != nil {
+				rt.Logger.Warn().Str("bucket", _bucket.Name).Msg("Failed to parse X-RateLimit-Remaining header")
+			}
+
+			rlLimit, err := strconv.ParseInt(gotils.B2S(resp.Header.Peek("X-RateLimit-Limit")), 10, 32)
+			if err != nil {
+				rt.Logger.Warn().Str("bucket", _bucket.Name).Msg("Failed to parse X-RateLimit-Limit header")
+			}
+
+			_bucket.Mu.Lock()
+			atomic.StoreInt64(_bucket.ResetsAt, resetNano)
+			atomic.StoreInt32(_bucket.Available, int32(rlRemaining))
+			atomic.StoreInt32(_bucket.Limit, int32(rlLimit))
+			_bucket.Mu.Unlock()
+
+			if _alias != nil {
+				_alias.Mu.Lock()
+				atomic.StoreInt64(_alias.ResetsAt, resetNano)
+				atomic.StoreInt32(_alias.Available, int32(rlRemaining))
+				atomic.StoreInt32(_alias.Limit, int32(rlLimit))
+				_alias.Mu.Unlock()
 			}
 
 			break main
@@ -1027,14 +1105,14 @@ func (rt *RestTunnel) TraverseBucket(bucketStr string) (_bucket *bucket.Bucket, 
 		bucketStack = append(bucketStack, bucketStr)
 
 		if _, ok := stack[bucketStr]; ok {
-			return nil, bucketStack, bucket.ErrBucketCircularAlias
+			return nil, bucketStack, xerrors.Errorf("%w %s %v", bucket.ErrBucketCircularAlias, bucketStr, bucketStack)
 		}
 
 		stack[bucketStr] = true
 
 		_bucket, ok := rt.Buckets[bucketStr]
 		if !ok {
-			return nil, bucketStack, bucket.ErrBucketDoesNotExist
+			return nil, bucketStack, xerrors.Errorf("%w %s", bucket.ErrBucketDoesNotExist, bucketStr)
 		}
 
 		if _bucket.Alias != "" && _bucket.Alias != _bucket.Name {

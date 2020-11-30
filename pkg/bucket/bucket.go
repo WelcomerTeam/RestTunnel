@@ -8,15 +8,15 @@ import (
 	"golang.org/x/xerrors"
 )
 
-// ErrBucketDoesNotExist is raised when attempting to fetch a bucket that does not exist
-var ErrBucketDoesNotExist = xerrors.New("Bucket '%s' does not exist")
+// ErrBucketDoesNotExist is raised when attempting to fetch a bucket that does not exist.
+var ErrBucketDoesNotExist = xerrors.New("Bucket does not exist")
 
-// ErrBucketCircularAlias is raised when a bucket references itself down a stack
-var ErrBucketCircularAlias = xerrors.New("Bucket '%s' references itself. Stack: %v")
+// ErrBucketCircularAlias is raised when a bucket references itself down a stack.
+var ErrBucketCircularAlias = xerrors.New("Bucket references itself")
 
-// Bucket represents a ratelimit bucket
+// Bucket represents a ratelimit bucket.
 type Bucket struct {
-	mu sync.RWMutex
+	Mu sync.RWMutex
 
 	Name  string
 	Alias string
@@ -31,9 +31,10 @@ type Bucket struct {
 	Available *int32
 }
 
-// CreateBucket creates a new bucket
+// CreateBucket creates a new bucket.
 func CreateBucket(name string, limit int32, duration time.Duration, alias string, global string) (b *Bucket) {
 	nanos := duration.Nanoseconds()
+
 	return &Bucket{
 		Name:     name,
 		Alias:    alias,
@@ -48,12 +49,12 @@ func CreateBucket(name string, limit int32, duration time.Duration, alias string
 
 // Lock waits until a bucket is ready.
 func (b *Bucket) Lock() (hit bool) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.Mu.RLock()
+	defer b.Mu.RUnlock()
 
 	now := time.Now().UnixNano()
 
-	// If we have passed reset, reset the available hits
+	// If we have passed reset, reset the available hits.
 	if atomic.LoadInt64(b.ResetsAt) <= now {
 		atomic.StoreInt64(b.ResetsAt, now+atomic.LoadInt64(b.Duration))
 		atomic.StoreInt32(b.Available, atomic.LoadInt32(b.Limit))
@@ -61,30 +62,27 @@ func (b *Bucket) Lock() (hit bool) {
 
 	if atomic.LoadInt32(b.Available) <= 0 {
 		sleepDuration := time.Duration(atomic.LoadInt64(b.ResetsAt) - now)
+
+		println("LOCKED! SLEEPING", sleepDuration.String())
+
 		hit = true
+
 		time.Sleep(sleepDuration)
+
 		b.Lock()
+
 		return
 	}
 
 	atomic.AddInt32(b.Available, -1)
+
 	return
 }
 
-// Exhaust removes all available calls and modifies the ResetAfter
+// Exhaust removes all available calls and modifies the ResetAfter.
 func (b *Bucket) Exhaust(reset int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 	atomic.StoreInt32(b.Available, 0)
 	atomic.StoreInt64(b.ResetsAt, reset)
-}
-
-// Modify modifies the Limit, Duration etc
-func (b *Bucket) Modify(limit int32, duration int64, alias string, global string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.Alias = alias
-	b.Global = global
-	atomic.StoreInt32(b.Limit, limit)
-	atomic.StoreInt64(b.Duration, duration)
 }
