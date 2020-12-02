@@ -63,8 +63,6 @@ func (b *Bucket) Lock() (hit bool) {
 	if atomic.LoadInt32(b.Available) <= 0 {
 		sleepDuration := time.Duration(atomic.LoadInt64(b.ResetsAt) - now)
 
-		println("LOCKED! SLEEPING", sleepDuration.String())
-
 		hit = true
 
 		time.Sleep(sleepDuration)

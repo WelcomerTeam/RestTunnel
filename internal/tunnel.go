@@ -662,16 +662,12 @@ main:
 				reset = time.Unix(0, (_reset*1000)*int64(time.Millisecond))
 			}
 
-			println(payload.RetryAfter, gotils.B2S(resp.Header.Peek("X-RateLimit-Reset")), gotils.B2S(resp.Header.Peek("X-RateLimit-Reset")))
-
 			if payload.RetryAfter >= 10000 {
 				// We've fucked up.
 				reset = now.Add(time.Duration(payload.RetryAfter) * time.Millisecond)
 			}
 
 			resetNano := reset.Add(time.Millisecond * 500).UnixNano()
-
-			println("I should be waiting", time.Unix(0, resetNano).Sub(time.Now()).String())
 
 			if payload.Global {
 				if _bucket.Global != "" {
