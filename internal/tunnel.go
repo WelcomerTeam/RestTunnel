@@ -581,8 +581,7 @@ main:
 		var ok bool
 
 		switch status {
-		case http.StatusPermanentRedirect:
-		case http.StatusTemporaryRedirect:
+		case http.StatusPermanentRedirect, http.StatusTemporaryRedirect:
 			// We are likely being sent a redirect, go to it and if no location is provided then just continue
 			location := resp.Header.Peek("Location")
 			if len(location) > 0 {
