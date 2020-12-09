@@ -36,7 +36,7 @@ import (
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // VERSION respects semantic versioning.
-const VERSION = "1.1.1"
+const VERSION = "1.2"
 
 // ConfigurationPath is the path to the file the configration will be located
 // at.
@@ -127,8 +127,7 @@ type RestTunnel struct {
 
 	// Uses total response time and requests to calculate average
 	AnalyticsAverageResponse *accumulator.Accumulator
-	analyticsResponseTotal   *int64
-	analyticsRequests        *int64
+	AverageResponse          *accumulator.Accumulator
 
 	Router *MethodRouter
 }
@@ -184,9 +183,7 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 		callbacksMu: sync.RWMutex{},
 		Callbacks:   make(map[uuid.UUID]*structs.TunnelResponse),
 
-		analyticsWaiting:       new(int64),
-		analyticsResponseTotal: new(int64),
-		analyticsRequests:      new(int64),
+		analyticsWaiting: new(int64),
 	}
 
 	configuration, err := rt.LoadConfiguration(ConfigurationPath)
@@ -207,6 +204,9 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 	rt.AnalyticsAverageResponse = accumulator.NewAccumulator(rt.ctx, Samples, Interval, "Average response time")
 	rt.AnalyticsWaiting = accumulator.NewAccumulator(rt.ctx, Samples, Interval, "Waiting Requests")
 
+	// This is used to get the average response timeof the last few responses
+	rt.AverageResponse = accumulator.NewAccumulator(rt.ctx, 25, time.Hour, "")
+
 	go rt.TakeOutTheTrash()
 	go func() {
 		e := time.NewTicker(Interval)
@@ -216,11 +216,13 @@ func NewTunnel(logger io.Writer) (rt *RestTunnel, err error) {
 			case <-e.C:
 				now := time.Now().UTC().Round(time.Second)
 
-				if analyticsRequests := atomic.LoadInt64(rt.analyticsRequests); analyticsRequests == 0 {
+				samples := rt.AverageResponse.GetAllSamples()
+
+				if len(samples.Samples) == 0 {
 					rt.AnalyticsAverageResponse.IncrementBy(0)
 				} else {
 					rt.AnalyticsAverageResponse.IncrementBy(
-						atomic.LoadInt64(rt.analyticsResponseTotal) / analyticsRequests,
+						int64(samples.Avg()),
 					)
 				}
 
@@ -812,8 +814,8 @@ func (rt *RestTunnel) HandleRequest(ctx *fasthttp.RequestCtx) {
 				ms)
 		}
 
-		atomic.AddInt64(rt.analyticsResponseTotal, ms)
-		atomic.AddInt64(rt.analyticsRequests, 1)
+		rt.AverageResponse.IncrementBy(ms)
+		rt.AverageResponse.RunOnce(startTime)
 	}()
 
 	path = gotils.B2S(ctx.Request.URI().Path())
