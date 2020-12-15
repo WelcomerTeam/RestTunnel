@@ -36,7 +36,7 @@ import (
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // VERSION respects semantic versioning.
-const VERSION = "1.2"
+const VERSION = "1.2.1"
 
 // ConfigurationPath is the path to the file the configration will be located
 // at.
@@ -409,9 +409,10 @@ func (rt *RestTunnel) CollectQueues() (cleaned int, dur time.Duration) {
 func (rt *RestTunnel) CollectCallbacks() (cleaned int, dur time.Duration) {
 	now := time.Now().UTC()
 	interval := time.Second * time.Duration(rt.Configuration.State.CallbackExpiration)
-	removals := make([]uuid.UUID, 0, len(rt.Callbacks))
 
 	rt.callbacksMu.RLock()
+	removals := make([]uuid.UUID, 0, len(rt.Callbacks))
+
 	for callbackID, callback := range rt.Callbacks {
 		if callback.Expiration.Before(now) {
 			removals = append(removals, callbackID)
@@ -479,7 +480,9 @@ func (rt *RestTunnel) StartQueueJob(q *Queue) {
 // HandleQueueJob handles a TunnelRequest gathered from a queue.
 func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 	// This goroutine shows a job that is taking too long.
+	stageMu := sync.RWMutex{}
 	stage := "init"
+
 	fin := make(chan bool)
 
 	go func() {
@@ -492,21 +495,23 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 			case <-fin:
 				return
 			case <-t.C:
+				stageMu.RLock()
 				rt.Logger.Warn().
 					Str("stage", stage).
 					Msgf("Job for %s has been in stage '%s' for too long."+
 						"Been executing for %f seconds. Possible deadlock?",
 						string(tr.URI), stage, time.Since(since).Round(time.Second).Seconds())
+				stageMu.RUnlock()
 				t.Reset(waitTime)
 			}
 		}
 	}()
 
-	defer func() {
-		close(fin)
-	}()
+	defer close(fin)
 
+	stageMu.RLock()
 	stage = "cbki"
+	stageMu.RUnlock()
 
 	tunnelResponse := &structs.TunnelResponse{
 		Expiration: time.Now().UTC().Add(time.Second * time.Duration(rt.Configuration.State.CallbackExpiration)),
@@ -519,7 +524,10 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 	rt.Callbacks[tr.ID] = tunnelResponse
 	rt.callbacksMu.Unlock()
 
+	stageMu.RLock()
 	stage = "aqrq"
+	stageMu.RUnlock()
+
 	req := fasthttp.AcquireRequest()
 	tr.Req.Request.CopyTo(req)
 	req.SetBody(tr.Req.Request.Body())
@@ -554,7 +562,9 @@ func (rt *RestTunnel) HandleQueueJob(tr *structs.TunnelRequest) {
 	requestDone := false
 main:
 	for i := 1; i < MaxRedirects; i++ {
+		stageMu.RLock()
 		stage = "bckt"
+		stageMu.RUnlock()
 
 		hit = _bucket.Lock()
 		if _bucket.Global != "" {
@@ -567,16 +577,24 @@ main:
 			rt.AnalyticsMiss.Increment()
 		}
 
+		stageMu.RLock()
 		stage = "aqrs"
+		stageMu.RUnlock()
+
 		resp = fasthttp.AcquireResponse()
 
+		stageMu.RLock()
 		stage = "dorq"
+		stageMu.RUnlock()
 
 		err = rt.HTTP.Do(req, resp)
 		now := time.Now().UTC()
 		rt.AnalyticsRequests.Increment()
 
+		stageMu.RLock()
 		stage = "rtlm"
+		stageMu.RUnlock()
+
 		status := resp.StatusCode()
 
 		var _alias *bucket.Bucket
@@ -771,19 +789,25 @@ main:
 	tunnelResponse.Response = resp
 	tunnelResponse.Error = err
 
+	stageMu.RLock()
 	stage = "clbk"
+	stageMu.RUnlock()
 
 	rt.callbacksMu.Lock()
 	rt.Callbacks[tr.ID] = tunnelResponse
 	rt.callbacksMu.Unlock()
 
+	stageMu.RLock()
 	stage = "chan"
+	stageMu.RUnlock()
 
 	if tr.ResponseType == structs.RespondWithResponse {
 		tr.Callback <- true
 	}
 
+	stageMu.RLock()
 	stage = "done"
+	stageMu.RUnlock()
 }
 
 // HandleRequest handles a HTTP request given to RestTunnel.

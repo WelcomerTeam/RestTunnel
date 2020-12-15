@@ -61,6 +61,9 @@ func DurationTimestamp(d time.Duration) (output string) {
 // createLineChart creates a LineChart from an accumulator.
 func createLineChart(ac *accumulator.Accumulator,
 	background string, border string) (chart structs.LineChart) {
+	ac.RLock()
+	defer ac.RUnlock()
+
 	data := make([]interface{}, 0, len(ac.Samples))
 
 	for _, sample := range ac.Samples {
