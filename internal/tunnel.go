@@ -1109,7 +1109,7 @@ func (rt *RestTunnel) TunnelHTTPRequest(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("RT-Bucket", tunnelRequest.Bucket)
 		ctx.Response.Header.Set("RT-Buckets", strings.Join(bucketStack, ";"))
 
-		ctx.Redirect("/callbacks/"+tunnelRequest.ID.String(), 303)
+		ctx.Redirect("/resttunnel/callbacks/"+tunnelRequest.ID.String(), 303)
 	case structs.NoResponse:
 	}
 }
