@@ -13,7 +13,7 @@ COPY . .
 
 RUN go build -o ./out/resttunnel ./cmd/main.go
 
-FROM alpine:3.9
+FROM alpine:3.13
 RUN apk add ca-certificates
 
 COPY --from=build_base /tmp/resttunnel/out/resttunnel /app/resttunnel
